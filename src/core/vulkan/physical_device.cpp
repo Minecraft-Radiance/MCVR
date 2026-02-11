@@ -3,7 +3,12 @@
 #include "core/vulkan/instance.hpp"
 #include "core/vulkan/window.hpp"
 
+#include <cerrno>
+#include <cstdlib>
 #include <iostream>
+#include <limits>
+#include <optional>
+#include <string>
 #include <vector>
 
 std::ostream &physicalDeviceCout() {
@@ -60,6 +65,54 @@ bool isDeviceSuitable(VkPhysicalDevice device) {
     }
 }
 
+namespace {
+struct CandidateDevice {
+    VkPhysicalDevice device = VK_NULL_HANDLE;
+    VkPhysicalDeviceProperties properties{};
+    uint32_t index = 0;
+    uint64_t score = 0;
+};
+
+uint64_t scorePhysicalDevice(VkPhysicalDevice device, const VkPhysicalDeviceProperties &properties) {
+    uint64_t score = 0;
+
+    switch (properties.deviceType) {
+    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+        score += 1'000'000'000ull;
+        break;
+    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+        score += 500'000'000ull;
+        break;
+    case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
+        score += 100'000'000ull;
+        break;
+    case VK_PHYSICAL_DEVICE_TYPE_OTHER:
+        score += 50'000'000ull;
+        break;
+    case VK_PHYSICAL_DEVICE_TYPE_CPU:
+    default:
+        break;
+    }
+
+    // // Prefer devices with higher practical limits.
+    score += static_cast<uint64_t>(properties.limits.maxImageDimension2D);
+    score += static_cast<uint64_t>(properties.limits.maxPerStageDescriptorSampledImages);
+    return score;
+}
+
+std::optional<uint32_t> parseGpuIndexOverride(const char *envValue) {
+    if (envValue == nullptr || envValue[0] == '\0') return std::nullopt;
+
+    char *end = nullptr;
+    errno = 0;
+    const long parsed = std::strtol(envValue, &end, 10);
+    if (errno != 0 || end == envValue || *end != '\0' || parsed < 0 || parsed > std::numeric_limits<uint32_t>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<uint32_t>(parsed);
+}
+} // namespace
+
 void vk::PhysicalDevice::findPhysicalDevice() {
     uint32_t deviceCount = 0;
     if (vkEnumeratePhysicalDevices(instance_->vkInstance(), &deviceCount, nullptr) != VK_SUCCESS || deviceCount == 0) {
@@ -73,32 +126,56 @@ void vk::PhysicalDevice::findPhysicalDevice() {
         exit(1);
     }
 
-    // find the first supported physical device
-    for (const auto &device : devices) {
-        if (isDeviceSuitable(device)) {
-            VkPhysicalDeviceProperties properties;
-            vkGetPhysicalDeviceProperties(device, &properties);
+    // Optional manual override: choose device by enumerate index.
+    // Example: MCVR_GPU_INDEX=1
+    const char *gpuIndexEnv = std::getenv("MCVR_GPU_INDEX");
+    const auto overrideIndex = parseGpuIndexOverride(gpuIndexEnv);
+    if (gpuIndexEnv != nullptr && !overrideIndex.has_value()) {
+        physicalDeviceCerr() << "MCVR_GPU_INDEX is invalid: '" << gpuIndexEnv << "', fallback to auto selection."
+                             << std::endl;
+    }
 
-            if (properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) continue;
-
-            physicalDevice_ = device;
-#ifdef DEBUG
-            physicalDeviceCout() << "found suitable physical device" << std::endl;
-#endif
-
-            // output device info
-            uint32_t supportedVersion[] = {VK_VERSION_MAJOR(properties.apiVersion),
-                                           VK_VERSION_MINOR(properties.apiVersion),
-                                           VK_VERSION_PATCH(properties.apiVersion)};
-
-#ifdef DEBUG
-            physicalDeviceCout() << "selected device name: " << properties.deviceName << std::endl;
-            physicalDeviceCout() << "supports Vulkan version: " << supportedVersion[0] << "." << supportedVersion[1]
-                                 << "." << supportedVersion[2] << std::endl;
-#endif
-
-            return;
+    if (overrideIndex.has_value()) {
+        if (overrideIndex.value() < devices.size()) {
+            VkPhysicalDevice overrideDevice = devices[overrideIndex.value()];
+            VkPhysicalDeviceProperties overrideProperties{};
+            vkGetPhysicalDeviceProperties(overrideDevice, &overrideProperties);
+            if (isDeviceSuitable(overrideDevice) && overrideProperties.deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU) {
+                physicalDevice_ = overrideDevice;
+                physicalDeviceCout() << "selected device via MCVR_GPU_INDEX=" << overrideIndex.value() << ": "
+                                     << overrideProperties.deviceName << std::endl;
+                return;
+            }
+            physicalDeviceCerr() << "MCVR_GPU_INDEX=" << overrideIndex.value()
+                                 << " points to an unsupported device, fallback to auto selection." << std::endl;
+        } else {
+            physicalDeviceCerr() << "MCVR_GPU_INDEX=" << overrideIndex.value() << " is out of range [0, "
+                                 << (devices.size() - 1) << "], fallback to auto selection." << std::endl;
         }
+    }
+
+    std::optional<CandidateDevice> best;
+    for (uint32_t i = 0; i < devices.size(); i++) {
+        const auto &device = devices[i];
+        if (!isDeviceSuitable(device)) continue;
+
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(device, &properties);
+
+        if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) continue;
+
+        const uint64_t score = scorePhysicalDevice(device, properties);
+        if (!best.has_value() || score > best->score) { best = CandidateDevice{device, properties, i, score}; }
+    }
+
+    if (best.has_value()) {
+        physicalDevice_ = best->device;
+#ifdef DEBUG
+        physicalDeviceCout() << "selected device index: " << best->index << std::endl;
+#endif
+        physicalDeviceCout() << "selected device name: " << best->properties.deviceName << std::endl;
+        physicalDeviceCout() << "selected device score: " << best->score << std::endl;
+        return;
     }
 
     // if no supported physical device is found
