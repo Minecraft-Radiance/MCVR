@@ -25,6 +25,9 @@ vk::Window::Window(std::shared_ptr<Instance> instance, uint32_t width, uint32_t 
         GLFW_Terminate();
         exit(EXIT_FAILURE);
     }
+
+    glfwSetWindowUserPointer(window_, this);
+    glfwSetFramebufferSizeCallback(window_, framebufferResizeCallback);
 }
 
 vk::Window::Window(std::shared_ptr<Instance> instance, GLFWwindow *window_) : instance_(instance), window_(window_) {
@@ -35,6 +38,9 @@ vk::Window::Window(std::shared_ptr<Instance> instance, GLFWwindow *window_) : in
         GLFW_Terminate();
         exit(EXIT_FAILURE);
     }
+
+    glfwSetWindowUserPointer(window_, this);
+    glfwSetFramebufferSizeCallback(window_, framebufferResizeCallback);
 }
 
 vk::Window::~Window() {
@@ -46,10 +52,20 @@ vk::Window::~Window() {
 }
 
 uint32_t vk::Window::width() {
+    int framebufferWidth = 0;
+    int framebufferHeight = 0;
+    GLFW_GetFramebufferSize(window_, &framebufferWidth, &framebufferHeight);
+    if (framebufferWidth > 0) { width_ = static_cast<uint32_t>(framebufferWidth); }
+    if (framebufferHeight > 0) { height_ = static_cast<uint32_t>(framebufferHeight); }
     return width_;
 }
 
 uint32_t vk::Window::height() {
+    int framebufferWidth = 0;
+    int framebufferHeight = 0;
+    GLFW_GetFramebufferSize(window_, &framebufferWidth, &framebufferHeight);
+    if (framebufferWidth > 0) { width_ = static_cast<uint32_t>(framebufferWidth); }
+    if (framebufferHeight > 0) { height_ = static_cast<uint32_t>(framebufferHeight); }
     return height_;
 }
 
@@ -59,4 +75,13 @@ GLFWwindow *vk::Window::window() {
 
 VkSurfaceKHR &vk::Window::vkSurface() {
     return surface_;
+}
+
+void vk::Window::framebufferResizeCallback(GLFWwindow *window, int width, int height) {
+    auto *self = reinterpret_cast<Window *>(glfwGetWindowUserPointer(window));
+    if (self != nullptr) {
+        if (width > 0) self->width_ = static_cast<uint32_t>(width);
+        if (height > 0) self->height_ = static_cast<uint32_t>(height);
+    }
+    framebufferResized = true;
 }

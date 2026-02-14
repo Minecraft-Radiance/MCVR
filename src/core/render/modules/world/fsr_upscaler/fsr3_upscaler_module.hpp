@@ -5,14 +5,14 @@
 #include <deque>
 #include <chrono>
 
-class UpscalerModuleContext;
+class FSR3UpscalerModuleContext;
 
 namespace mcvr {
     class FSR3Upscaler;
 }
 
-class UpscalerModule : public WorldModule, public SharedObject<UpscalerModule> {
-    friend UpscalerModuleContext;
+class FSR3UpscalerModule : public WorldModule, public SharedObject<FSR3UpscalerModule> {
+    friend FSR3UpscalerModuleContext;
 
   public:
     enum class QualityMode {
@@ -30,8 +30,8 @@ class UpscalerModule : public WorldModule, public SharedObject<UpscalerModule> {
     static bool isQualityModeAttributeKey(const std::string &key);
     static bool parseQualityModeValue(const std::string &value, QualityMode &outMode);
 
-    UpscalerModule();
-    ~UpscalerModule() = default;
+    FSR3UpscalerModule();
+    ~FSR3UpscalerModule() = default;
 
     void init(std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline);
 
@@ -63,7 +63,7 @@ class UpscalerModule : public WorldModule, public SharedObject<UpscalerModule> {
     void initImages();
     void initPipeline();
 
-    std::vector<std::shared_ptr<UpscalerModuleContext>> contexts_;
+    std::vector<std::shared_ptr<FSR3UpscalerModuleContext>> contexts_;
     
     // Resolution state
     uint32_t renderWidth_ = 0;
@@ -95,11 +95,11 @@ class UpscalerModule : public WorldModule, public SharedObject<UpscalerModule> {
     std::vector<std::array<std::shared_ptr<vk::DeviceLocalImage>, 2>> outputImages_;
 };
 
-class UpscalerModuleContext : public WorldModuleContext {
+class FSR3UpscalerModuleContext : public WorldModuleContext {
   public:
-    UpscalerModuleContext(std::shared_ptr<FrameworkContext> frameworkContext,
+    FSR3UpscalerModuleContext(std::shared_ptr<FrameworkContext> frameworkContext,
                           std::shared_ptr<WorldPipelineContext> worldPipelineContext,
-                          std::shared_ptr<UpscalerModule> upscalerModule);
+                          std::shared_ptr<FSR3UpscalerModule> upscalerModule);
 
     void render() override;
 
@@ -121,7 +121,7 @@ class UpscalerModuleContext : public WorldModuleContext {
     bool checkCameraReset(const glm::vec3 &cameraPos, const glm::vec3 &cameraDir);
     float getSmoothDeltaTime();
 
-    std::weak_ptr<UpscalerModule> upscalerModule_;
+    std::weak_ptr<FSR3UpscalerModule> upscalerModule_;
     
     // Timing
     std::deque<float> frameTimes_;

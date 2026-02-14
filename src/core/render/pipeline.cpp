@@ -5,7 +5,7 @@
 
 #include "core/render/modules/ui_module.hpp"
 #include "core/render/modules/world/dlss/dlss_module.hpp"
-#include "core/render/modules/world/fsr_upscaler/upscaler_module.hpp"
+#include "core/render/modules/world/fsr_upscaler/fsr3_upscaler_module.hpp"
 #include "core/render/modules/world/nrd/nrd_module.hpp"
 #include "core/render/modules/world/post_render/post_render_module.hpp"
 #include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
@@ -15,6 +15,7 @@
 
 #include <cstdlib>
 #include <iomanip>
+#include <optional>
 #include <set>
 
 WorldPipelineBlueprint::WorldPipelineBlueprint(WorldPipelineBuildParams *params) {
@@ -78,28 +79,33 @@ void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<P
                          std::vector<std::shared_ptr<vk::DeviceLocalImage>>(blueprint->imageFormats_.size(), nullptr));
     contexts_.resize(frameNum);
 
-    // Determine initial render resolution from upscaler quality (if present)
     VkExtent2D extent = framework->swapchain()->vkExtent();
-    uint32_t renderWidth = extent.width;
-    uint32_t renderHeight = extent.height;
-    size_t upscalerIndex = std::numeric_limits<size_t>::max();
-    UpscalerModule::QualityMode upscalerMode = UpscalerModule::QualityMode::NativeAA;
-    for (size_t i = 0; i < blueprint->moduleNames_.size(); i++) {
-        if (blueprint->moduleNames_[i] != UpscalerModule::NAME) continue;
-        upscalerIndex = i;
-        const auto &kvs = blueprint->attributeKVs_[i];
-        for (size_t k = 0; k + 1 < kvs.size(); k += 2) {
-            const std::string &key = kvs[k];
-            const std::string &value = kvs[k + 1];
-            if (UpscalerModule::isQualityModeAttributeKey(key)) {
-                UpscalerModule::parseQualityModeValue(value, upscalerMode);
+    auto inferModuleExtent = [&](int frameIndex,
+                                 const std::vector<uint32_t> &outputIndices,
+                                 const std::vector<uint32_t> &inputIndices) -> std::pair<uint32_t, uint32_t> {
+        auto tryIndices = [&](const std::vector<uint32_t> &indices) -> std::optional<std::pair<uint32_t, uint32_t>> {
+            for (uint32_t idx : indices) {
+                if (idx >= sharedImages_[frameIndex].size()) continue;
+                auto &img = sharedImages_[frameIndex][idx];
+                if (img) return {{img->width(), img->height()}};
             }
-        }
-        if (upscalerMode != UpscalerModule::QualityMode::NativeAA) {
-            UpscalerModule::getRenderResolution(extent.width, extent.height, upscalerMode, &renderWidth, &renderHeight);
-        }
-        break;
-    }
+            return std::nullopt;
+        };
+
+        if (auto size = tryIndices(outputIndices)) return *size;
+        if (auto size = tryIndices(inputIndices)) return *size;
+        return {extent.width, extent.height};
+    };
+    auto createImageAt = [&](int frameIndex, uint32_t idx, uint32_t width, uint32_t height, VkFormat format) {
+        if (sharedImages_[frameIndex][idx]) return;
+        sharedImages_[frameIndex][idx] = vk::DeviceLocalImage::create(
+            framework->device(), framework->vma(), false, width, height, 1, format,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+#ifdef USE_AMD
+                | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+#endif
+        );
+    };
 
     for (int frameIndex = 0; frameIndex < frameNum; frameIndex++) {
         // Keep the primary output at display resolution
@@ -112,31 +118,9 @@ void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<P
         );
     }
 
-    // Pre-create outputs for modules before upscaler at render resolution
-    if (upscalerIndex != std::numeric_limits<size_t>::max() &&
-        (renderWidth != extent.width || renderHeight != extent.height)) {
-        std::set<uint32_t> renderIndices;
-        for (size_t i = 0; i < upscalerIndex; i++) {
-            for (uint32_t idx : blueprint->modulesOutputIndices_[i]) renderIndices.insert(idx);
-        }
-
-        for (int frameIndex = 0; frameIndex < frameNum; frameIndex++) {
-            for (uint32_t idx : renderIndices) {
-                if (sharedImages_[frameIndex][idx] != nullptr) continue;
-                sharedImages_[frameIndex][idx] = vk::DeviceLocalImage::create(
-                    framework->device(), framework->vma(), false, renderWidth, renderHeight, 1,
-                    blueprint->imageFormats_[idx],
-                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
-#ifdef USE_AMD
-                        | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
-#endif
-                );
-            }
-        }
-    }
-
     for (int i = blueprint->moduleNames_.size() - 1; i >= 0; i--) {
         worldModules_[i] = Pipeline::worldModuleConstructors[blueprint->moduleNames_[i]](framework, shared_from_this());
+        worldModules_[i]->setAttributes(blueprint->attributeCounts_[i], blueprint->attributeKVs_[i]);
 
         auto &moduleInputIndices = blueprint->modulesInputIndices_[i];
         auto &moduleOutputIndices = blueprint->modulesOutputIndices_[i];
@@ -151,8 +135,18 @@ void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<P
                 }
                 bool result = worldModules_[i]->setOrCreateOutputImages(outputImages, outputFormats, frameIndex);
                 if (!result) {
-                    std::cout << blueprint->moduleNames_[i] << std::endl;
-                    throw std::runtime_error("Output image not set properly");
+                    auto [w, h] = inferModuleExtent(frameIndex, moduleOutputIndices, moduleInputIndices);
+                    for (int j = 0; j < moduleOutputIndices.size(); j++) {
+                        createImageAt(frameIndex, moduleOutputIndices[j], w, h, blueprint->imageFormats_[moduleOutputIndices[j]]);
+                        outputImages[j] = sharedImages_[frameIndex][moduleOutputIndices[j]];
+                    }
+
+                    result = worldModules_[i]->setOrCreateOutputImages(outputImages, outputFormats, frameIndex);
+                    if (!result) {
+                        std::cerr << "[WorldPipeline] Output image setup failed after fallback for module: "
+                                  << blueprint->moduleNames_[i] << std::endl;
+                        throw std::runtime_error("Output image not set properly");
+                    }
                 }
                 for (int j = 0; j < moduleOutputIndices.size(); j++) {
                     sharedImages_[frameIndex][moduleOutputIndices[j]] = outputImages[j];
@@ -167,14 +161,24 @@ void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<P
                     inputFormats.push_back(blueprint->imageFormats_[moduleInputIndices[j]]);
                 }
                 bool result = worldModules_[i]->setOrCreateInputImages(inputImages, inputFormats, frameIndex);
-                if (!result) throw std::runtime_error("Input image not set properly");
+                if (!result) {
+                    auto [w, h] = inferModuleExtent(frameIndex, moduleOutputIndices, moduleInputIndices);
+                    for (int j = 0; j < moduleInputIndices.size(); j++) {
+                        createImageAt(frameIndex, moduleInputIndices[j], w, h, blueprint->imageFormats_[moduleInputIndices[j]]);
+                        inputImages[j] = sharedImages_[frameIndex][moduleInputIndices[j]];
+                    }
+                    result = worldModules_[i]->setOrCreateInputImages(inputImages, inputFormats, frameIndex);
+                    if (!result) {
+                        std::cerr << "[WorldPipeline] Input image setup failed after fallback for module: "
+                                  << blueprint->moduleNames_[i] << std::endl;
+                        throw std::runtime_error("Input image not set properly");
+                    }
+                }
                 for (int j = 0; j < moduleInputIndices.size(); j++) {
                     sharedImages_[frameIndex][moduleInputIndices[j]] = inputImages[j];
                 }
             }
         }
-
-        worldModules_[i]->setAttributes(blueprint->attributeCounts_[i], blueprint->attributeKVs_[i]);
 
         worldModules_[i]->build();
     }
@@ -319,11 +323,11 @@ void Pipeline::collectWorldModules() {
                                                                         TemporalAccumulationModule::outputImageNum)));
 
     worldModuleConstructors.insert(std::make_pair(
-        UpscalerModule::NAME, [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
-            return UpscalerModule::create(framework, worldPipeline);
+        FSR3UpscalerModule::NAME, [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
+            return FSR3UpscalerModule::create(framework, worldPipeline);
         }));
     worldModuleInOutImageNums.insert(std::make_pair(
-        UpscalerModule::NAME, std::make_pair(UpscalerModule::inputImageNum, UpscalerModule::outputImageNum)));
+        FSR3UpscalerModule::NAME, std::make_pair(FSR3UpscalerModule::inputImageNum, FSR3UpscalerModule::outputImageNum)));
 
     worldModuleConstructors.insert(
         std::make_pair(ToneMappingModule::NAME,

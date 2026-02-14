@@ -133,8 +133,16 @@ void vk::Swapchain::reconstruct() {
     // Choose presentation mode (preferring MAILBOX ~= triple buffering)
     presentMode_ = choosePresentMode(presentModes);
 
-    // Select swap chain size
-    extent_ = chooseSwapExtent(surfaceCapabilities, window_->width(), window_->height());
+    // Select swap chain size from the current framebuffer dimensions.
+    int framebufferWidth = 0;
+    int framebufferHeight = 0;
+    GLFW_GetFramebufferSize(window_->window(), &framebufferWidth, &framebufferHeight);
+    if (framebufferWidth <= 0 || framebufferHeight <= 0) {
+        framebufferWidth = static_cast<int>(window_->width());
+        framebufferHeight = static_cast<int>(window_->height());
+    }
+    extent_ = chooseSwapExtent(surfaceCapabilities, static_cast<uint32_t>(framebufferWidth),
+                               static_cast<uint32_t>(framebufferHeight));
 
     // Determine transformation to use (preferring no transform)
     VkSurfaceTransformFlagBitsKHR surfaceTransform;

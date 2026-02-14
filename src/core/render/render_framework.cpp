@@ -186,6 +186,26 @@ Framework::~Framework() {
 void Framework::acquireContext() {
     if (!running_) return;
 
+    // Fullscreen transitions can miss framebuffer resize callbacks on some paths.
+    // Proactively detect extent drift and rebuild swapchain/pipeline before acquire.
+    int framebufferWidth = 0;
+    int framebufferHeight = 0;
+    GLFW_GetFramebufferSize(window_->window(), &framebufferWidth, &framebufferHeight);
+    const VkExtent2D currentExtent = swapchain_->vkExtent();
+    const bool hasValidFramebuffer = framebufferWidth > 0 && framebufferHeight > 0;
+    const bool extentMismatch = hasValidFramebuffer &&
+                                (currentExtent.width != static_cast<uint32_t>(framebufferWidth) ||
+                                 currentExtent.height != static_cast<uint32_t>(framebufferHeight));
+    if (extentMismatch) {
+#ifdef DEBUG
+        std::cerr << "[Framework] framebuffer/swapchain extent mismatch, recreate: fb=" << framebufferWidth << "x"
+                  << framebufferHeight << " swap=" << currentExtent.width << "x" << currentExtent.height
+                  << std::endl;
+#endif
+        recreate();
+        return;
+    }
+
     std::shared_ptr<FrameworkContext> lastContext;
     if (currentContext_) lastContext = currentContext_;
     VkResult result;
@@ -194,12 +214,21 @@ void Framework::acquireContext() {
     uint32_t imageIndex;
     result = vkAcquireNextImageKHR(device_->vkDevice(), swapchain_->vkSwapchain(), UINT64_MAX,
                                    imageAcquiredSemaphore->vkSemaphore(), VK_NULL_HANDLE, &imageIndex);
-    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR ||
+        result == VK_ERROR_SURFACE_LOST_KHR
+#ifdef VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT
+        || result == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT
+#endif
+    ) {
+#ifdef DEBUG
+        std::cerr << "[Framework] vkAcquireNextImageKHR requires recreate, VkResult=" << std::dec << result
+                  << std::endl;
+#endif
         recycleSemaphore(imageAcquiredSemaphore);
         recreate();
         return;
     } else if (result != VK_SUCCESS) {
-        std::cerr << "Cannot acquire images from swapchain" << std::endl;
+        std::cerr << "Cannot acquire images from swapchain, VkResult=" << std::dec << result << std::endl;
         recycleSemaphore(imageAcquiredSemaphore);
         waitDeviceIdle();
         exit(EXIT_FAILURE);
@@ -318,7 +347,12 @@ void Framework::present() {
 
     VkResult result = vkQueuePresentKHR(device_->mainVkQueue(), &presentInfo);
 
-    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || vk::Window::framebufferResized ||
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR ||
+        result == VK_ERROR_SURFACE_LOST_KHR
+#ifdef VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT
+        || result == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT
+#endif
+        || vk::Window::framebufferResized ||
         Renderer::options.needRecreate || pipeline_->needRecreate) {
         recreate();
         return;

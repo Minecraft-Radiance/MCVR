@@ -1,4 +1,4 @@
-#include "upscaler_module.hpp"
+#include "fsr3_upscaler_module.hpp"
 
 #include "core/render/buffers.hpp"
 #include "core/render/modules/world/fsr_upscaler/fsr3_upscaler.hpp"
@@ -8,13 +8,13 @@
 
 #include <iostream>
 
-UpscalerModule::UpscalerModule() {}
+FSR3UpscalerModule::FSR3UpscalerModule() {}
 
-bool UpscalerModule::isQualityModeAttributeKey(const std::string &key) {
+bool FSR3UpscalerModule::isQualityModeAttributeKey(const std::string &key) {
     return key == "render_pipeline.module.fsr3_upscaler.attribute.quality_mode";
 }
 
-bool UpscalerModule::parseQualityModeValue(const std::string &value, QualityMode &outMode) {
+bool FSR3UpscalerModule::parseQualityModeValue(const std::string &value, QualityMode &outMode) {
     if (value == "0" || value == "native" || value == "native_aa" || value == "1x") {
         outMode = QualityMode::NativeAA;
         return true;
@@ -38,7 +38,7 @@ bool UpscalerModule::parseQualityModeValue(const std::string &value, QualityMode
     return false;
 }
 
-void UpscalerModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
+void FSR3UpscalerModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
     WorldModule::init(framework, worldPipeline);
 
     uint32_t size = framework->swapchain()->imageCount();
@@ -48,7 +48,7 @@ void UpscalerModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<
     outputImages_.resize(size);
 }
 
-bool UpscalerModule::setOrCreateInputImages(std::vector<std::shared_ptr<vk::DeviceLocalImage>> &images,
+bool FSR3UpscalerModule::setOrCreateInputImages(std::vector<std::shared_ptr<vk::DeviceLocalImage>> &images,
                                             std::vector<VkFormat> &formats, uint32_t frameIndex) {
     if (images.size() != inputImageNum) return false;
 
@@ -88,7 +88,7 @@ bool UpscalerModule::setOrCreateInputImages(std::vector<std::shared_ptr<vk::Devi
     return true;
 }
 
-bool UpscalerModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::DeviceLocalImage>> &images,
+bool FSR3UpscalerModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::DeviceLocalImage>> &images,
                                              std::vector<VkFormat> &formats, uint32_t frameIndex) {
     if (images.size() != outputImageNum) return false;
 
@@ -125,7 +125,7 @@ bool UpscalerModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::Dev
     return true;
 }
 
-void UpscalerModule::build() {
+void FSR3UpscalerModule::build() {
     auto fw = framework_.lock();
     auto wp = worldPipeline_.lock();
     uint32_t size = fw->swapchain()->imageCount();
@@ -153,7 +153,7 @@ void UpscalerModule::build() {
     if (!fsr3Enabled_) {
         initialized_ = false;
     } else if (!fsr3_->initialize(config)) {
-        std::cerr << "UpscalerModule: Failed to initialize FSR3" << std::endl;
+        std::cerr << "FSR3UpscalerModule: Failed to initialize FSR3" << std::endl;
         initialized_ = false;
     } else {
         initialized_ = true;
@@ -166,7 +166,7 @@ void UpscalerModule::build() {
     contexts_.resize(size);
     for (uint32_t i = 0; i < size; i++) {
         contexts_[i] =
-            std::make_shared<UpscalerModuleContext>(fw->contexts()[i], wp->contexts()[i], shared_from_this());
+            std::make_shared<FSR3UpscalerModuleContext>(fw->contexts()[i], wp->contexts()[i], shared_from_this());
 
         contexts_[i]->inputColorImage = inputImages_[i][0];
         contexts_[i]->inputDepthImage = inputImages_[i][1];
@@ -182,7 +182,7 @@ void UpscalerModule::build() {
     }
 }
 
-void UpscalerModule::initDescriptorTables() {
+void FSR3UpscalerModule::initDescriptorTables() {
     auto fw = framework_.lock();
     uint32_t size = fw->swapchain()->imageCount();
     depthDescriptorTables_.resize(size);
@@ -226,7 +226,7 @@ void UpscalerModule::initDescriptorTables() {
     }
 }
 
-void UpscalerModule::initImages() {
+void FSR3UpscalerModule::initImages() {
     auto fw = framework_.lock();
     uint32_t size = fw->swapchain()->imageCount();
 
@@ -243,7 +243,7 @@ void UpscalerModule::initImages() {
     }
 }
 
-void UpscalerModule::initPipeline() {
+void FSR3UpscalerModule::initPipeline() {
     auto fw = framework_.lock();
     auto shader = vk::Shader::create(fw->device(), (Renderer::folderPath / "shaders/world/upscaler/linear_to_device_depth_comp.spv").string());
 
@@ -253,7 +253,7 @@ void UpscalerModule::initPipeline() {
                                    .build(fw->device());
 }
 
-void UpscalerModule::setAttributes(int attributeCount, std::vector<std::string> &attributeKVs) {
+void FSR3UpscalerModule::setAttributes(int attributeCount, std::vector<std::string> &attributeKVs) {
     auto parseBool = [](const std::string &value) {
         if (value == "1" || value == "true" || value == "True" || value == "TRUE") return true;
         if (value == "0" || value == "false" || value == "False" || value == "FALSE") return false;
@@ -285,14 +285,14 @@ void UpscalerModule::setAttributes(int attributeCount, std::vector<std::string> 
     }
 }
 
-std::vector<std::shared_ptr<WorldModuleContext>> &UpscalerModule::contexts() {
+std::vector<std::shared_ptr<WorldModuleContext>> &FSR3UpscalerModule::contexts() {
     return reinterpret_cast<std::vector<std::shared_ptr<WorldModuleContext>> &>(contexts_);
 }
 
-void UpscalerModule::bindTexture(std::shared_ptr<vk::Sampler> sampler, std::shared_ptr<vk::DeviceLocalImage> image,
+void FSR3UpscalerModule::bindTexture(std::shared_ptr<vk::Sampler> sampler, std::shared_ptr<vk::DeviceLocalImage> image,
                                  int index) {}
 
-void UpscalerModule::preClose() {
+void FSR3UpscalerModule::preClose() {
     if (fsr3_) {
         fsr3_->destroy();
         fsr3_.reset();
@@ -300,7 +300,7 @@ void UpscalerModule::preClose() {
     initialized_ = false;
 }
 
-void UpscalerModule::getRenderResolution(uint32_t displayWidth, uint32_t displayHeight, QualityMode mode,
+void FSR3UpscalerModule::getRenderResolution(uint32_t displayWidth, uint32_t displayHeight, QualityMode mode,
                                          uint32_t *outRenderWidth, uint32_t *outRenderHeight) {
     float ratio = 1.0f;
     switch (mode) {
@@ -315,14 +315,14 @@ void UpscalerModule::getRenderResolution(uint32_t displayWidth, uint32_t display
     *outRenderHeight = static_cast<uint32_t>(static_cast<float>(displayHeight) / ratio);
 }
 
-UpscalerModuleContext::UpscalerModuleContext(std::shared_ptr<FrameworkContext> frameworkContext,
+FSR3UpscalerModuleContext::FSR3UpscalerModuleContext(std::shared_ptr<FrameworkContext> frameworkContext,
                                              std::shared_ptr<WorldPipelineContext> worldPipelineContext,
-                                             std::shared_ptr<UpscalerModule> upscalerModule)
+                                             std::shared_ptr<FSR3UpscalerModule> upscalerModule)
     : WorldModuleContext(frameworkContext, worldPipelineContext), upscalerModule_(upscalerModule) {
     lastFrameTime_ = std::chrono::high_resolution_clock::now();
 }
 
-bool UpscalerModuleContext::checkCameraReset(const glm::vec3 &cameraPos, const glm::vec3 &cameraDir) {
+bool FSR3UpscalerModuleContext::checkCameraReset(const glm::vec3 &cameraPos, const glm::vec3 &cameraDir) {
     auto module = upscalerModule_.lock();
     if (module->firstFrame_) {
         module->firstFrame_ = false;
@@ -340,7 +340,7 @@ bool UpscalerModuleContext::checkCameraReset(const glm::vec3 &cameraPos, const g
     return shouldReset;
 }
 
-float UpscalerModuleContext::getSmoothDeltaTime() {
+float FSR3UpscalerModuleContext::getSmoothDeltaTime() {
     auto currentTime = std::chrono::high_resolution_clock::now();
     float deltaMs = std::chrono::duration<float, std::milli>(currentTime - lastFrameTime_).count();
     lastFrameTime_ = currentTime;
@@ -360,7 +360,7 @@ float UpscalerModuleContext::getSmoothDeltaTime() {
     return sum / frameTimes_.size();
 }
 
-void UpscalerModuleContext::render() {
+void FSR3UpscalerModuleContext::render() {
     auto module = upscalerModule_.lock();
     if (!module) return;
 
