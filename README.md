@@ -22,7 +22,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DJAVA_PROJECT_ROOT_DIR=${PATH_TO
 Build and install.
 
 ```
-cmake --build build
+cmake --build build -j
 cmake --install build
 ```
 
@@ -37,7 +37,7 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DJAVA_PROJECT_ROOT_DIR=${
 Build and install.
 
 ```
-cmake --build build --config Release
+cmake --build build -j --config Release
 cmake --install build --config Release
 ```
 
