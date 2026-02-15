@@ -22,7 +22,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DJAVA_PROJECT_ROOT_DIR=${PATH_TO
 Build and install.
 
 ```
-cmake --build build
+cmake --build build -j$(nproc)
 cmake --install build
 ```
 
