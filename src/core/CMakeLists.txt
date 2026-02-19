@@ -18,6 +18,41 @@ if (MCVR_ENABLE_NRD)
     target_compile_definitions(core PUBLIC NRD_STATIC_LIBRARY=1)
     target_compile_definitions(core PUBLIC MCVR_ENABLE_NRD)
 endif ()
+if (MCVR_ENABLE_XESS)
+    target_include_directories(core PUBLIC ${XESS_INCLUDE_DIR})
+    if (WIN32)
+        target_link_libraries(core PUBLIC "${PROJECT_SOURCE_DIR}/extern/xess/lib/libxess.lib")
+        target_compile_definitions(core PUBLIC MCVR_ENABLE_XESS)
+
+        # Install XeSS runtime DLLs
+        set(XESS_DLLS
+            "${PROJECT_SOURCE_DIR}/extern/xess/bin/libxess.dll"
+        )
+        install(FILES ${XESS_DLLS} DESTINATION ${MCVR_INSTALL_LIB_DIR})
+        install(FILES ${XESS_DLLS} DESTINATION ${MCVR_INSTALL_BIN_DIR})
+    else ()
+        # Linux builds require a native XeSS shared library (e.g. libxess.so/.dylib).
+        # Missing right now. build without XeSS backend to avoid unresolved xess* symbols at runtime.
+        find_library(XESS_RUNTIME_LIB
+            NAMES xess libxess
+            PATHS
+                "${PROJECT_SOURCE_DIR}/extern/xess/lib"
+                "${PROJECT_SOURCE_DIR}/extern/xess/bin"
+        )
+
+        if (XESS_RUNTIME_LIB)
+            target_link_libraries(core PUBLIC "${XESS_RUNTIME_LIB}")
+            target_compile_definitions(core PUBLIC MCVR_ENABLE_XESS)
+
+            get_filename_component(XESS_RUNTIME_DIR "${XESS_RUNTIME_LIB}" DIRECTORY)
+            set_property(TARGET core APPEND PROPERTY BUILD_RPATH "${XESS_RUNTIME_DIR}")
+        else ()
+            message(WARNING "MCVR_ENABLE_XESS=ON but no native XeSS runtime library found; building core without XeSS backend symbols.")
+        endif ()
+    endif ()
+endif ()
+
+
 if (MSVC)
     target_compile_definitions(core PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(core PRIVATE /utf-8)

@@ -25,3 +25,6 @@
 [submodule "extern/FidelityFX-SDK"]
 	path = extern/FidelityFX-SDK
 	url = https://github.com/Interstellarss/FidelityFX-SDK.git
+[submodule "extern/xess"]
+	path = extern/xess
+	url = https://github.com/intel/xess.git

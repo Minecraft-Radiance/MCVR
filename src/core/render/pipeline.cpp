@@ -9,9 +9,9 @@
 #include "core/render/modules/world/nrd/nrd_module.hpp"
 #include "core/render/modules/world/post_render/post_render_module.hpp"
 #include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
-#include "core/render/modules/world/svgf/svgf_module.hpp"
 #include "core/render/modules/world/temporal_accumulation/temporal_accumulation_module.hpp"
 #include "core/render/modules/world/tone_mapping/tone_mapping_module.hpp"
+#include "core/render/modules/world/xess_upscaler/xess_sr_module.hpp"
 
 #include <cstdlib>
 #include <iomanip>
@@ -328,6 +328,14 @@ void Pipeline::collectWorldModules() {
         }));
     worldModuleInOutImageNums.insert(std::make_pair(
         FSR3UpscalerModule::NAME, std::make_pair(FSR3UpscalerModule::inputImageNum, FSR3UpscalerModule::outputImageNum)));
+    
+    worldModuleConstructors.insert(std::make_pair(
+        XessSrModule::NAME, [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
+            return XessSrModule::create(framework, worldPipeline);
+        }));
+    worldModuleInOutImageNums.insert(std::make_pair(
+        XessSrModule::NAME, std::make_pair(XessSrModule::inputImageNum, XessSrModule::outputImageNum)));
+
 
     worldModuleConstructors.insert(
         std::make_pair(ToneMappingModule::NAME,

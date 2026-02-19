@@ -126,4 +126,13 @@ else()
     message(STATUS "NRD Denoiser Disabled")
 endif()
 
+# Intel XeSS Super Resolution
+option(MCVR_ENABLE_XESS "Enable Intel XeSS Super Resolution support" ON)
+if (MCVR_ENABLE_XESS)
+    message(STATUS "Intel XeSS Enabled")
+    set(XESS_INCLUDE_DIR ${PROJECT_SOURCE_DIR}/extern/xess/inc)
+else()
+    message(STATUS "Intel XeSS Disabled")
+endif()
+
 add_subdirectory(src)
