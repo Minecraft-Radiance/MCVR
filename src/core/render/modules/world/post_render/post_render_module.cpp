@@ -29,8 +29,9 @@ bool PostRenderModule::setOrCreateInputImages(std::vector<std::shared_ptr<vk::De
     auto framework = framework_.lock();
     if (images[0] == nullptr) {
         ldrImages_[frameIndex] = images[0] = vk::DeviceLocalImage::create(
-            framework->device(), framework->vma(), false, width_, height_, 1, formats[0],
+            framework->device(), framework->vma(), false, width_, height_, eyeCount_, formats[0],
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        if (eyeCount_ > 1) images[0]->createPerLayerViews();
     } else {
         if (images[0]->width() != width_ || images[0]->height() != height_) return false;
         ldrImages_[frameIndex] = images[0];
@@ -38,8 +39,9 @@ bool PostRenderModule::setOrCreateInputImages(std::vector<std::shared_ptr<vk::De
 
     if (images[1] == nullptr) {
         firstHitDepthImages_[frameIndex] = images[1] = vk::DeviceLocalImage::create(
-            framework->device(), framework->vma(), false, width_, height_, 1, formats[1],
+            framework->device(), framework->vma(), false, width_, height_, eyeCount_, formats[1],
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        if (eyeCount_ > 1) images[1]->createPerLayerViews();
     } else {
         if (images[1]->width() != width_ || images[1]->height() != height_) return false;
         firstHitDepthImages_[frameIndex] = images[1];
@@ -93,7 +95,8 @@ void PostRenderModule::bindTexture(std::shared_ptr<vk::Sampler> sampler,
     auto framework = framework_.lock();
 
     uint32_t size = framework->swapchain()->imageCount();
-    for (int i = 0; i < size; i++) {
+    uint32_t totalCtx = size * eyeCount_;
+    for (int i = 0; i < totalCtx; i++) {
         if (descriptorTables_[i] != nullptr)
             descriptorTables_[i]->bindSamplerImage(sampler, image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 0,
                                                    index);
@@ -105,11 +108,12 @@ void PostRenderModule::preClose() {}
 void PostRenderModule::initDescriptorTables() {
     auto framework = framework_.lock();
     uint32_t size = framework->swapchain()->imageCount();
+    uint32_t totalCtx = size * eyeCount_;
 
-    descriptorTables_.resize(size);
-    samplers_.resize(size);
+    descriptorTables_.resize(totalCtx);
+    samplers_.resize(totalCtx);
 
-    for (int i = 0; i < size; i++) {
+    for (int i = 0; i < totalCtx; i++) {
         descriptorTables_[i] = vk::DescriptorTableBuilder{}
                                    .beginDescriptorLayoutSet() // set 0
                                    .beginDescriptorLayoutSetBinding()
@@ -165,6 +169,11 @@ void PostRenderModule::initDescriptorTables() {
                                    })
                                    .endDescriptorLayoutSetBinding()
                                    .endDescriptorLayoutSet()
+                                   .definePushConstant({
+                                       .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                       .offset = 0,
+                                       .size = sizeof(PostRenderPushConstant),
+                                   })
                                    .build(framework->device());
 
         samplers_[i] = vk::Sampler::create(framework->device(), VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR,
@@ -179,18 +188,24 @@ void PostRenderModule::initImages() {
     uint32_t size = framework->swapchain()->imageCount();
 
     worldLightMapImages_.resize(size);
-    worldPostDepthImages_.resize(size);
+    uint32_t totalCtx = size * eyeCount_;
+    worldPostDepthImages_.resize(totalCtx);
 
     for (int i = 0; i < size; i++) {
         worldLightMapImages_[i] =
             vk::DeviceLocalImage::create(device, vma, false, 16, 16, 1, VK_FORMAT_R8G8B8A8_UNORM,
                                          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-        descriptorTables_[i]->bindSamplerImageForShader(samplers_[i], worldLightMapImages_[i], 0, 1);
 
-        descriptorTables_[i]->bindImage(firstHitDepthImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 2);
+        for (uint32_t e = 0; e < eyeCount_; e++) {
+            uint32_t dtIdx = i * eyeCount_ + e;
+            uint32_t viewIdx = eyeCount_ > 1 ? 1 + e : 0;
 
-        worldPostDepthImages_[i] = vk::DeviceLocalImage::create(
-            device, vma, false, width_, height_, 1, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+            descriptorTables_[dtIdx]->bindSamplerImageForShader(samplers_[dtIdx], worldLightMapImages_[i], 0, 1);
+            descriptorTables_[dtIdx]->bindImage(firstHitDepthImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 2, viewIdx);
+
+            worldPostDepthImages_[dtIdx] = vk::DeviceLocalImage::create(
+                device, vma, false, width_, height_, 1, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+        }
     }
 }
 
@@ -431,9 +446,11 @@ void PostRenderModule::initFrameBuffers() {
     auto device = framework->device();
     uint32_t size = framework->swapchain()->imageCount();
 
+    uint32_t totalCtx = size * eyeCount_;
+
     worldLightMapFramebuffers_.resize(size);
-    worldPostColorToDepthFramebuffers_.resize(size);
-    worldPostFramebuffers_.resize(size);
+    worldPostColorToDepthFramebuffers_.resize(totalCtx);
+    worldPostFramebuffers_.resize(totalCtx);
 
     for (int i = 0; i < size; i++) {
         worldLightMapFramebuffers_[i] = vk::FramebufferBuilder{}
@@ -442,18 +459,23 @@ void PostRenderModule::initFrameBuffers() {
                                             .endAttachment()
                                             .build(device, worldLightMapRenderPass_);
 
-        worldPostColorToDepthFramebuffers_[i] = vk::FramebufferBuilder{}
-                                                    .beginAttachment()
-                                                    .defineAttachment(worldPostDepthImages_[i])
-                                                    .endAttachment()
-                                                    .build(device, worldPostColorToDepthRenderPass_);
+        for (uint32_t e = 0; e < eyeCount_; e++) {
+            uint32_t idx = i * eyeCount_ + e;
+            uint32_t viewIdx = eyeCount_ > 1 ? 1 + e : 0;
 
-        worldPostFramebuffers_[i] = vk::FramebufferBuilder{}
-                                        .beginAttachment()
-                                        .defineAttachment(postRenderedImages_[i])
-                                        .defineAttachment(worldPostDepthImages_[i])
-                                        .endAttachment()
-                                        .build(device, worldPostRenderPass_);
+            worldPostColorToDepthFramebuffers_[idx] = vk::FramebufferBuilder{}
+                                                          .beginAttachment()
+                                                          .defineAttachment(worldPostDepthImages_[idx])
+                                                          .endAttachment()
+                                                          .build(device, worldPostColorToDepthRenderPass_);
+
+            worldPostFramebuffers_[idx] = vk::FramebufferBuilder{}
+                                              .beginAttachment()
+                                              .defineAttachment(postRenderedImages_[i], viewIdx)
+                                              .defineAttachment(worldPostDepthImages_[idx])
+                                              .endAttachment()
+                                              .build(device, worldPostRenderPass_);
+        }
     }
 }
 
@@ -686,15 +708,24 @@ PostRenderModuleContext::PostRenderModuleContext(std::shared_ptr<FrameworkContex
       ldrImage(postRenderModule->ldrImages_[frameworkContext->frameIndex]),
       firstHitDepthImage(postRenderModule->firstHitDepthImages_[frameworkContext->frameIndex]),
       worldLightMapImage(postRenderModule->worldLightMapImages_[frameworkContext->frameIndex]),
-      worldPostDepthImage(postRenderModule->worldPostDepthImages_[frameworkContext->frameIndex]),
-      descriptorTable(postRenderModule->descriptorTables_[frameworkContext->frameIndex]),
       worldLightMapFramebuffer(postRenderModule->worldLightMapFramebuffers_[frameworkContext->frameIndex]),
-      worldPostColorToDepthFramebuffer(
-          postRenderModule->worldPostColorToDepthFramebuffers_[frameworkContext->frameIndex]),
-      worldPostFramebuffer(postRenderModule->worldPostFramebuffers_[frameworkContext->frameIndex]),
-      postRenderedImage(postRenderModule->postRenderedImages_[frameworkContext->frameIndex]) {}
+      postRenderedImage(postRenderModule->postRenderedImages_[frameworkContext->frameIndex]),
+      eyeCount_(postRenderModule->eyeCount_) {
+    uint32_t fi = frameworkContext->frameIndex;
+    uint32_t base = fi * eyeCount_;
+    for (uint32_t e = 0; e < eyeCount_; e++) {
+        descriptorTables.push_back(postRenderModule->descriptorTables_[base + e]);
+        worldPostDepthImages.push_back(postRenderModule->worldPostDepthImages_[base + e]);
+        worldPostColorToDepthFramebuffers.push_back(postRenderModule->worldPostColorToDepthFramebuffers_[base + e]);
+        worldPostFramebuffers.push_back(postRenderModule->worldPostFramebuffers_[base + e]);
+    }
+}
 
 void PostRenderModuleContext::render() {
+    render3D(1);
+}
+
+void PostRenderModuleContext::render3D(uint32_t eyeCount) {
     auto context = frameworkContext.lock();
     auto framework = context->framework.lock();
     auto worldCommandBuffer = context->worldCommandBuffer;
@@ -792,29 +823,34 @@ void PostRenderModuleContext::render() {
     ensureLayout(firstHitDepthImage, VK_IMAGE_LAYOUT_GENERAL,
                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
-    if (worldPostDepthImage && worldPostDepthImage->imageLayout() != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
-        VkPipelineStageFlags2 srcStage = 0;
-        VkAccessFlags2 srcAccess = 0;
-        chooseSrc(worldPostDepthImage->imageLayout(), VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, srcStage, srcAccess);
-        worldCommandBuffer->barriersBufferImage(
-            {}, {{.srcStageMask = srcStage,
-                  .srcAccessMask = srcAccess,
-                  .dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
-                  .dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                  .oldLayout = worldPostDepthImage->imageLayout(),
-                  .newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                  .srcQueueFamilyIndex = mainQueueIndex,
-                  .dstQueueFamilyIndex = mainQueueIndex,
-                  .image = worldPostDepthImage,
-                  .subresourceRange = vk::wholeDepthSubresourceRange}});
-        worldPostDepthImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    for (uint32_t e = 0; e < eyeCount; e++) {
+        auto &eyeDepth = worldPostDepthImages[e];
+        if (eyeDepth && eyeDepth->imageLayout() != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+            VkPipelineStageFlags2 srcStage = 0;
+            VkAccessFlags2 srcAccess = 0;
+            chooseSrc(eyeDepth->imageLayout(), VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                      VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, srcStage, srcAccess);
+            worldCommandBuffer->barriersBufferImage(
+                {}, {{.srcStageMask = srcStage,
+                      .srcAccessMask = srcAccess,
+                      .dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                      .dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                      .oldLayout = eyeDepth->imageLayout(),
+                      .newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                      .srcQueueFamilyIndex = mainQueueIndex,
+                      .dstQueueFamilyIndex = mainQueueIndex,
+                      .image = eyeDepth,
+                      .subresourceRange = vk::wholeDepthSubresourceRange}});
+            eyeDepth->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        }
     }
 
-    descriptorTable->bindBuffer(buffers->worldUniformBuffer(), 1, 0);
-    descriptorTable->bindBuffer(buffers->skyUniformBuffer(), 1, 1);
-    descriptorTable->bindBuffer(buffers->lightMapUniformBuffer(), 1, 2);
-    descriptorTable->bindBuffer(Renderer::instance().buffers()->textureMappingBuffer(), 2, 0);
+    for (uint32_t e = 0; e < eyeCount; e++) {
+        descriptorTables[e]->bindBuffer(buffers->worldUniformBuffer(), 1, 0);
+        descriptorTables[e]->bindBuffer(buffers->skyUniformBuffer(), 1, 1);
+        descriptorTables[e]->bindBuffer(buffers->lightMapUniformBuffer(), 1, 2);
+        descriptorTables[e]->bindBuffer(Renderer::instance().buffers()->textureMappingBuffer(), 2, 0);
+    }
 
     // render light map
     {
@@ -849,16 +885,24 @@ void PostRenderModuleContext::render() {
     worldLightMapImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     worldCommandBuffer->bindGraphicsPipeline(module->worldLightMapPipeline_)
-        ->bindDescriptorTable(descriptorTable, VK_PIPELINE_BIND_POINT_GRAPHICS)
+        ->bindDescriptorTable(descriptorTables[0], VK_PIPELINE_BIND_POINT_GRAPHICS)
         ->draw(3, 1)
         ->endRenderPass();
     worldLightMapImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+    // ---- PER-EYE LOOP ----
+    for (uint32_t eye = 0; eye < eyeCount; eye++) {
+        auto &eyeDT = descriptorTables[eye];
+        auto &eyeDepth = worldPostDepthImages[eye];
+        auto &eyeC2DFB = worldPostColorToDepthFramebuffers[eye];
+        auto &eyePostFB = worldPostFramebuffers[eye];
+        uint32_t eyeLayer = eyeCount > 1 ? eye : 0;
 
     // cast linear depth from color to depth format
     {
         VkPipelineStageFlags2 srcStageDepth = 0;
         VkAccessFlags2 srcAccessDepth = 0;
-        chooseSrc(worldPostDepthImage->imageLayout(),
+        chooseSrc(eyeDepth->imageLayout(),
                   VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                   VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                   srcStageDepth, srcAccessDepth);
@@ -876,11 +920,11 @@ void PostRenderModuleContext::render() {
                      .srcAccessMask = srcAccessDepth,
                      .dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                     .oldLayout = worldPostDepthImage->imageLayout(),
+                     .oldLayout = eyeDepth->imageLayout(),
                      .newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                      .srcQueueFamilyIndex = mainQueueIndex,
                      .dstQueueFamilyIndex = mainQueueIndex,
-                     .image = worldPostDepthImage,
+                     .image = eyeDepth,
                      .subresourceRange = vk::wholeDepthSubresourceRange,
                  },
                  {
@@ -896,22 +940,22 @@ void PostRenderModuleContext::render() {
                      .subresourceRange = vk::wholeColorSubresourceRange,
                  }});
     }
-    worldPostDepthImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    eyeDepth->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     firstHitDepthImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
 
     worldCommandBuffer->beginRenderPass({
         .renderPass = module->worldPostColorToDepthRenderPass_,
-        .framebuffer = worldPostColorToDepthFramebuffer,
-        .renderAreaExtent = {worldPostDepthImage->width(), worldPostDepthImage->height()},
+        .framebuffer = eyeC2DFB,
+        .renderAreaExtent = {eyeDepth->width(), eyeDepth->height()},
         .clearValues = {{.depthStencil = {.depth = 1.0f}}},
     });
-    worldPostDepthImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    eyeDepth->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-    worldCommandBuffer->bindDescriptorTable(descriptorTable, VK_PIPELINE_BIND_POINT_GRAPHICS)
+    worldCommandBuffer->bindDescriptorTable(eyeDT, VK_PIPELINE_BIND_POINT_GRAPHICS)
         ->bindGraphicsPipeline(module->worldPostColorToDepthPipeline_)
         ->draw(3, 1)
         ->endRenderPass();
-    worldPostDepthImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    eyeDepth->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     // copy input to output
     {
@@ -964,13 +1008,13 @@ void PostRenderModuleContext::render() {
     VkImageBlit imageBlit{};
     imageBlit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     imageBlit.srcSubresource.mipLevel = 0;
-    imageBlit.srcSubresource.baseArrayLayer = 0;
+    imageBlit.srcSubresource.baseArrayLayer = eyeLayer;
     imageBlit.srcSubresource.layerCount = 1;
     imageBlit.srcOffsets[0] = {0, 0, 0};
     imageBlit.srcOffsets[1] = {static_cast<int>(ldrImage->width()), static_cast<int>(ldrImage->height()), 1};
     imageBlit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     imageBlit.dstSubresource.mipLevel = 0;
-    imageBlit.dstSubresource.baseArrayLayer = 0;
+    imageBlit.dstSubresource.baseArrayLayer = eyeLayer;
     imageBlit.dstSubresource.layerCount = 1;
     imageBlit.dstOffsets[0] = {0, 0, 0};
     imageBlit.dstOffsets[1] = {static_cast<int>(postRenderedImage->width()),
@@ -1034,17 +1078,23 @@ void PostRenderModuleContext::render() {
 
     worldCommandBuffer->beginRenderPass({
         .renderPass = module->worldPostRenderPass_,
-        .framebuffer = worldPostFramebuffer,
-        .renderAreaExtent = {worldPostDepthImage->width(), worldPostDepthImage->height()},
+        .framebuffer = eyePostFB,
+        .renderAreaExtent = {eyeDepth->width(), eyeDepth->height()},
         .clearValues = {},
     });
     postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    worldPostDepthImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    eyeDepth->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     std::shared_ptr<EntityPostBatch> entityPostRenderDataBatch =
         Renderer::instance().world()->entities()->entityPostBatch();
     if (entityPostRenderDataBatch != nullptr) {
-        worldCommandBuffer->bindDescriptorTable(descriptorTable, VK_PIPELINE_BIND_POINT_GRAPHICS)
+        PostRenderPushConstant pc{};
+        pc.eyeIndex = eye;
+        vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), eyeDT->vkPipelineLayout(),
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(PostRenderPushConstant), &pc);
+
+        worldCommandBuffer->bindDescriptorTable(eyeDT, VK_PIPELINE_BIND_POINT_GRAPHICS)
             ->bindGraphicsPipeline(module->worldPostPipeline_);
 
         for (int i = 0; i < entityPostRenderDataBatch->entities.size(); i++) {
@@ -1067,7 +1117,7 @@ void PostRenderModuleContext::render() {
 #else
     postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 #endif
-    worldPostDepthImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    eyeDepth->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     // render post star field
     {
@@ -1124,14 +1174,21 @@ void PostRenderModuleContext::render() {
 
     worldCommandBuffer->beginRenderPass({
         .renderPass = module->worldPostRenderPass_,
-        .framebuffer = worldPostFramebuffer,
-        .renderAreaExtent = {worldPostDepthImage->width(), worldPostDepthImage->height()},
+        .framebuffer = eyePostFB,
+        .renderAreaExtent = {eyeDepth->width(), eyeDepth->height()},
         .clearValues = {},
     });
     postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    worldPostDepthImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    eyeDepth->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-    worldCommandBuffer->bindDescriptorTable(descriptorTable, VK_PIPELINE_BIND_POINT_GRAPHICS)
+    {
+        PostRenderPushConstant pc{};
+        pc.eyeIndex = eye;
+        vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), eyeDT->vkPipelineLayout(),
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(PostRenderPushConstant), &pc);
+    }
+    worldCommandBuffer->bindDescriptorTable(eyeDT, VK_PIPELINE_BIND_POINT_GRAPHICS)
         ->bindGraphicsPipeline(module->worldPostStarFieldPipeline_)
 
         ->bindVertexBuffers(module->starFieldVertexBuffer)
@@ -1143,5 +1200,7 @@ void PostRenderModuleContext::render() {
 #else
     postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 #endif
-    worldPostDepthImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    eyeDepth->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    } // end per-eye loop
 }

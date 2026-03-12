@@ -6,6 +6,8 @@
 #include <iostream>
 #include <vector>
 
+VkPhysicalDevice vk::PhysicalDevice::overrideDevice = VK_NULL_HANDLE;
+
 std::ostream &physicalDeviceCout() {
     return std::cout << "[PhysicalDevice] ";
 }
@@ -61,6 +63,17 @@ bool isDeviceSuitable(VkPhysicalDevice device) {
 }
 
 void vk::PhysicalDevice::findPhysicalDevice() {
+    // If an override device was set (e.g. by OpenXR), use it directly.
+    if (overrideDevice != VK_NULL_HANDLE) {
+        physicalDevice_ = overrideDevice;
+        VkPhysicalDeviceProperties properties;
+        vkGetPhysicalDeviceProperties(physicalDevice_, &properties);
+#ifdef DEBUG
+        physicalDeviceCout() << "Using override physical device: " << properties.deviceName << std::endl;
+#endif
+        return;
+    }
+
     uint32_t deviceCount = 0;
     if (vkEnumeratePhysicalDevices(instance_->vkInstance(), &deviceCount, nullptr) != VK_SUCCESS || deviceCount == 0) {
         physicalDeviceCerr() << "failed to get number of physical devices" << std::endl;

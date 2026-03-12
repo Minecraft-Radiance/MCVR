@@ -48,6 +48,8 @@ class TemporalAccumulationModule : public WorldModule, public SharedObject<Tempo
 
     void preClose() override;
 
+    StereoMode stereoMode() const override { return StereoMode::SingleInstanceMultiDispatch; }
+
   private:
     void initDescriptorTables();
     void initImages();
@@ -108,5 +110,7 @@ struct TemporalAccumulationModuleContext : public WorldModuleContext, SharedObje
                                       std::shared_ptr<WorldPipelineContext> worldPipelineContext,
                                       std::shared_ptr<TemporalAccumulationModule> temporalAccumulationModule);
 
+    StereoMode stereoMode() const override { return StereoMode::SingleInstanceMultiDispatch; }
     void render() override;
+    void renderEye(uint32_t eyeIndex) override;
 };

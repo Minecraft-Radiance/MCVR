@@ -62,8 +62,6 @@ void DLSSModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<Worl
     firstHitDepthImages_.resize(size);
     processedImages_.resize(size);
     upscaledFirstHitDepthImages_.resize(size);
-
-    dlss_ = DlssRR::create();
 }
 
 bool DLSSModule::setOrCreateInputImages(std::vector<std::shared_ptr<vk::DeviceLocalImage>> &images,
@@ -211,7 +209,12 @@ void DLSSModule::build() {
     dlssRRInitInfo.inputSize = {inputWidth_, inputHeight_};
     dlssRRInitInfo.outputSize = {outputWidth_, outputHeight_};
     dlssRRInitInfo.quality = mode_;
-    ngxContext_->initDlssRR(dlssRRInitInfo, framework->mainCommandPool(), dlss_);
+
+    dlssInstances_.resize(eyeCount_);
+    for (uint32_t eye = 0; eye < eyeCount_; eye++) {
+        dlssInstances_[eye] = DlssRR::create();
+        ngxContext_->initDlssRR(dlssRRInitInfo, framework->mainCommandPool(), dlssInstances_[eye]);
+    }
 
     contexts_.resize(size);
 
@@ -230,7 +233,10 @@ void DLSSModule::bindTexture(std::shared_ptr<vk::Sampler> sampler,
                              int index) {}
 
 void DLSSModule::preClose() {
-    dlss_->deinit();
+    for (auto &dlss : dlssInstances_) {
+        dlss->deinit();
+    }
+    dlssInstances_.clear();
 }
 
 DLSSModuleContext::DLSSModuleContext(std::shared_ptr<FrameworkContext> frameworkContext,
@@ -238,6 +244,7 @@ DLSSModuleContext::DLSSModuleContext(std::shared_ptr<FrameworkContext> framework
                                      std::shared_ptr<DLSSModule> dlssModule)
     : WorldModuleContext(frameworkContext, worldPipelineContext),
       dLSSModule(dlssModule),
+      eyeCount_(dlssModule->eyeCount()),
       hdrImage(dlssModule->hdrImages_[frameworkContext->frameIndex]),
       diffuseAlbedoImage(dlssModule->diffuseAlbedoImages_[frameworkContext->frameIndex]),
       specularAlbedoImage(dlssModule->specularAlbedoImages_[frameworkContext->frameIndex]),
@@ -250,12 +257,17 @@ DLSSModuleContext::DLSSModuleContext(std::shared_ptr<FrameworkContext> framework
       upscaledFirstHitDepthImage(dlssModule->upscaledFirstHitDepthImages_[frameworkContext->frameIndex]) {}
 
 void DLSSModuleContext::render() {
+    renderEye(0);
+}
+
+void DLSSModuleContext::renderEye(uint32_t eyeIndex) {
     auto context = frameworkContext.lock();
     auto framework = context->framework.lock();
     auto worldCommandBuffer = context->worldCommandBuffer;
     auto mainQueueIndex = framework->physicalDevice()->mainQueueIndex();
 
     auto module = dLSSModule.lock();
+    uint32_t viewIdx = eyeCount_ > 1 ? 1 + eyeIndex : 0;
 
     {
         worldCommandBuffer->barriersBufferImage(
@@ -355,21 +367,24 @@ void DLSSModuleContext::render() {
         linearDepthImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
         processedImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
 
-        module->dlss_->setResource(DlssRR::RESOURCE_COLOR_IN, hdrImage);
-        module->dlss_->setResource(DlssRR::RESOURCE_COLOR_OUT, processedImage);
-        module->dlss_->setResource(DlssRR::RESOURCE_DIFFUSE_ALBEDO, diffuseAlbedoImage);
-        module->dlss_->setResource(DlssRR::RESOURCE_SPECULAR_ALBEDO, specularAlbedoImage);
-        module->dlss_->setResource(DlssRR::RESOURCE_NORMALROUGHNESS, normalRoughnessImage);
-        module->dlss_->setResource(DlssRR::RESOURCE_MOTIONVECTOR, motionVectorImage);
-        module->dlss_->setResource(DlssRR::RESOURCE_LINEARDEPTH, linearDepthImage);
-        module->dlss_->setResource(DlssRR::RESOURCE_SPECULAR_HITDISTANCE, specularHitDepthImage);
+        auto &dlss = module->dlssInstances_[eyeIndex];
+        dlss->setResource(DlssRR::RESOURCE_COLOR_IN, hdrImage, viewIdx);
+        dlss->setResource(DlssRR::RESOURCE_COLOR_OUT, processedImage, viewIdx);
+        dlss->setResource(DlssRR::RESOURCE_DIFFUSE_ALBEDO, diffuseAlbedoImage, viewIdx);
+        dlss->setResource(DlssRR::RESOURCE_SPECULAR_ALBEDO, specularAlbedoImage, viewIdx);
+        dlss->setResource(DlssRR::RESOURCE_NORMALROUGHNESS, normalRoughnessImage, viewIdx);
+        dlss->setResource(DlssRR::RESOURCE_MOTIONVECTOR, motionVectorImage, viewIdx);
+        dlss->setResource(DlssRR::RESOURCE_LINEARDEPTH, linearDepthImage, viewIdx);
+        dlss->setResource(DlssRR::RESOURCE_SPECULAR_HITDISTANCE, specularHitDepthImage, viewIdx);
 
         auto worldUBOBuffer = Renderer::instance().buffers()->worldUniformBuffer();
         auto worldUBO = static_cast<vk::Data::WorldUBO *>(worldUBOBuffer->mappedPtr());
         if (worldUBO != nullptr) {
             glm::vec2 jitter = worldUBO->cameraJitter;
-            module->dlss_->denoise(worldCommandBuffer, glm::uvec2{module->inputWidth_, module->inputHeight_}, jitter,
-                                   worldUBO->cameraViewMat, worldUBO->cameraProjMat);
+            glm::mat4 eyeView = worldUBO->eyeViewOffsets[eyeIndex] * worldUBO->cameraViewMat;
+            glm::mat4 eyeProj = worldUBO->eyeProjOffsets[eyeIndex] * worldUBO->cameraProjMat;
+            dlss->denoise(worldCommandBuffer, glm::uvec2{module->inputWidth_, module->inputHeight_}, jitter,
+                          eyeView, eyeProj);
         }
     }
 
@@ -407,14 +422,14 @@ void DLSSModuleContext::render() {
     VkImageBlit imageBlit{};
     imageBlit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     imageBlit.srcSubresource.mipLevel = 0;
-    imageBlit.srcSubresource.baseArrayLayer = 0;
+    imageBlit.srcSubresource.baseArrayLayer = eyeIndex;
     imageBlit.srcSubresource.layerCount = 1;
     imageBlit.srcOffsets[0] = {0, 0, 0};
     imageBlit.srcOffsets[1] = {static_cast<int>(firstHitDepthImage->width()),
                                static_cast<int>(firstHitDepthImage->height()), 1};
     imageBlit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     imageBlit.dstSubresource.mipLevel = 0;
-    imageBlit.dstSubresource.baseArrayLayer = 0;
+    imageBlit.dstSubresource.baseArrayLayer = eyeIndex;
     imageBlit.dstSubresource.layerCount = 1;
     imageBlit.dstOffsets[0] = {0, 0, 0};
     imageBlit.dstOffsets[1] = {static_cast<int>(upscaledFirstHitDepthImage->width()),

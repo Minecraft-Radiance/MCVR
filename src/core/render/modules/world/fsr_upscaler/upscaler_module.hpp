@@ -54,6 +54,8 @@ class UpscalerModule : public WorldModule, public SharedObject<UpscalerModule> {
 
     void preClose() override;
 
+    StereoMode stereoMode() const override { return StereoMode::DualInstance; }
+
     static void getRenderResolution(uint32_t displayWidth, uint32_t displayHeight,
                                    QualityMode mode,
                                    uint32_t* outRenderWidth, uint32_t* outRenderHeight);
@@ -75,15 +77,19 @@ class UpscalerModule : public WorldModule, public SharedObject<UpscalerModule> {
     float preExposure_ = 1.0f;
     bool fsr3Enabled_ = true;
 
-    // FSR3 implementation
-    std::shared_ptr<mcvr::FSR3Upscaler> fsr3_;
+    // FSR3 implementation (per-eye for stereo DualInstance)
+    std::vector<std::shared_ptr<mcvr::FSR3Upscaler>> fsr3Upscalers_;
     bool initialized_ = false;
 
-    // Depth conversion resources
+    // Depth conversion resources (indexed by frameIndex * eyeCount + eyeIndex)
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> deviceDepthImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> fsrMotionVectorImages_;
     std::vector<std::shared_ptr<vk::DescriptorTable>> depthDescriptorTables_;
     std::shared_ptr<vk::ComputePipeline> depthConversionPipeline_;
+
+    // Per-eye single-layer intermediates for FSR3 (can't handle array images)
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> fsr3ColorImages_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> fsr3OutputImages_;
 
     // Camera state for reset detection
     glm::vec3 lastCameraPos_ = glm::vec3(0.0f);
@@ -102,6 +108,8 @@ class UpscalerModuleContext : public WorldModuleContext {
                           std::shared_ptr<UpscalerModule> upscalerModule);
 
     void render() override;
+    StereoMode stereoMode() const override { return StereoMode::DualInstance; }
+    void renderEye(uint32_t eyeIndex) override;
 
     // Inputs (render resolution)
     std::shared_ptr<vk::DeviceLocalImage> inputColorImage;
@@ -127,4 +135,5 @@ class UpscalerModuleContext : public WorldModuleContext {
     std::deque<float> frameTimes_;
     std::chrono::high_resolution_clock::time_point lastFrameTime_;
     bool timingFirstFrame_ = true;
+    bool lastResetResult_ = false;
 };

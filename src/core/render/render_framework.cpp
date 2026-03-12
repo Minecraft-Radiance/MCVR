@@ -11,7 +11,9 @@
 #include "core/render/world.hpp"
 
 #include <iostream>
+#include <fstream>
 #include <random>
+#include <sstream>
 
 std::ostream &renderFrameworkCout() {
     return std::cout << "[Render Framework] ";
@@ -20,6 +22,14 @@ std::ostream &renderFrameworkCout() {
 std::ostream &renderFrameworkCerr() {
     return std::cerr << "[Render Framework] ";
 }
+
+#ifdef MCVR_ENABLE_OPENXR
+static void xrInitLog(const std::string &msg) {
+    std::cout << "[Render Framework] " << msg << std::endl;
+    std::ofstream file("openxr_debug.log", std::ios::out | std::ios::app);
+    file << "[Render Framework] " << msg << std::endl;
+}
+#endif
 
 FrameworkContext::FrameworkContext(std::shared_ptr<Framework> framework, uint32_t frameIndex)
     : framework(framework),
@@ -147,10 +157,79 @@ void FrameworkContext::fuseFinal() {
 Framework::Framework() {}
 
 void Framework::init(GLFWwindow *window) {
+#ifdef MCVR_ENABLE_OPENXR
+    // Stage A: pre-Vulkan OpenXR init — queries required Vulkan extensions
+    if (Renderer::options.vrEnabled) {
+        xrInitLog("VR enabled, attempting OpenXR init...");
+        try {
+            xrContext_ = std::make_unique<OpenXRContext>();
+            if (xrContext_->preVulkanInit()) {
+                // Inject OpenXR-required extensions into Vulkan creation
+                vk::Instance::extraExtensions = xrContext_->requiredInstanceExtensions();
+                vk::Device::extraExtensions = xrContext_->requiredDeviceExtensions();
+            } else {
+                xrInitLog("ERROR: OpenXR pre-init failed, falling back to non-VR");
+                xrContext_.reset();
+                Renderer::options.vrEnabled = false;
+            }
+        } catch (const std::exception &e) {
+            xrInitLog(std::string("ERROR: OpenXR pre-init exception: ") + e.what());
+            xrContext_.reset();
+            Renderer::options.vrEnabled = false;
+        } catch (...) {
+            xrInitLog("ERROR: OpenXR pre-init unknown exception");
+            xrContext_.reset();
+            Renderer::options.vrEnabled = false;
+        }
+    }
+#endif
+
     instance_ = vk::Instance::create();
     window_ = vk::Window::create(instance_, window);
+
+#ifdef MCVR_ENABLE_OPENXR
+    // Let OpenXR choose the physical device if available
+    if (xrContext_) {
+        try {
+            VkPhysicalDevice xrDev = xrContext_->getXRPhysicalDevice(instance_->vkInstance());
+            if (xrDev != VK_NULL_HANDLE) { vk::PhysicalDevice::overrideDevice = xrDev; }
+        } catch (...) {
+            xrInitLog("ERROR: xrGetVulkanGraphicsDeviceKHR exception, ignoring");
+        }
+    }
+#endif
+
     physicalDevice_ = vk::PhysicalDevice::create(instance_, window_);
     device_ = vk::Device::create(instance_, window_, physicalDevice_);
+
+#ifdef MCVR_ENABLE_OPENXR
+    // Stage B: post-Vulkan OpenXR init — creates session, swapchains
+    if (xrContext_) {
+        try {
+            if (!xrContext_->postVulkanInit(instance_->vkInstance(), physicalDevice_->vkPhysicalDevice(),
+                                            device_->vkDevice(), physicalDevice_->mainQueueIndex(), 0)) {
+                xrInitLog("ERROR: OpenXR post-init failed, falling back to non-VR");
+                xrContext_.reset();
+                Renderer::options.vrEnabled = false;
+            } else {
+                xrInitLog("OpenXR runtime prepared; session will start on explicit request");
+            }
+        } catch (const std::exception &e) {
+            xrInitLog(std::string("ERROR: OpenXR post-init exception: ") + e.what());
+            xrContext_.reset();
+            Renderer::options.vrEnabled = false;
+        } catch (...) {
+            xrInitLog("ERROR: OpenXR post-init unknown exception");
+            xrContext_.reset();
+            Renderer::options.vrEnabled = false;
+        }
+    }
+    // Clear statics after use
+    vk::Instance::extraExtensions.clear();
+    vk::Device::extraExtensions.clear();
+    vk::PhysicalDevice::overrideDevice = VK_NULL_HANDLE;
+#endif
+
     vma_ = vk::VMA::create(instance_, physicalDevice_, device_);
     swapchain_ = vk::Swapchain::create(physicalDevice_, device_, window_);
     mainCommandPool_ = vk::CommandPool::create(physicalDevice_, device_);
@@ -175,6 +254,19 @@ void Framework::init(GLFWwindow *window) {
     for (int i = 0; i < imageCount; i++) { contexts_.push_back(FrameworkContext::create(shared_from_this(), i)); }
 
     pipeline_ = Pipeline::create(shared_from_this());
+
+#ifdef MCVR_ENABLE_OPENXR
+    // Create GPU timestamp query pool for frame timing (2 queries per frame-in-flight)
+    if (xrContext_) {
+        timestampPeriodNs_ = physicalDevice_->properties().limits.timestampPeriod;
+        VkQueryPoolCreateInfo qpci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        qpci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qpci.queryCount = imageCount * 2;
+        vkCreateQueryPool(device_->vkDevice(), &qpci, nullptr, &gpuTimestampPool_);
+        // Reset all queries to "unavailable"
+        vkResetQueryPool(device_->vkDevice(), gpuTimestampPool_, 0, imageCount * 2);
+    }
+#endif
 }
 
 Framework::~Framework() {
@@ -186,15 +278,102 @@ Framework::~Framework() {
 void Framework::acquireContext() {
     if (!running_) return;
 
+#ifdef MCVR_ENABLE_OPENXR
+    // Poll OpenXR events and begin XR frame (updates head pose + FOV)
+    if (xrContext_) {
+        // Keep VRSystem config synchronized with options regardless of session state.
+        auto &vr = Renderer::instance().vrSystem();
+        vr.config.ipd = Renderer::options.vrIPD;
+        vr.config.renderScale = Renderer::options.vrRenderScale;
+        vr.config.worldScale = Renderer::options.vrWorldScale;
+
+        xrContext_->pollEvents();
+        bool sessionRunning = xrContext_->isSessionRunning();
+
+        // Runtime transition point: session on/off means eyeCount/resolution path changed.
+        if (sessionRunning != xrLastSessionRunning_) {
+            xrLastSessionRunning_ = sessionRunning;
+            Renderer::options.needRecreate = true;
+            if (pipeline_ != nullptr) pipeline_->needRecreate = true;
+
+            vr.enabled = Renderer::options.vrEnabled && sessionRunning;
+            vr.eyeCount = vr.enabled ? 2u : 1u;
+
+            if (sessionRunning) {
+                vr.worldOrientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+                vr.worldPosition = glm::vec3(0.0f);
+            } else {
+                vr.headPose = VRHeadPose{};
+                vr.worldOrientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+                vr.worldPosition = glm::vec3(0.0f);
+            }
+        }
+
+        if (sessionRunning) {
+            uint32_t xrW = xrContext_->swapchainWidth();
+            uint32_t xrH = xrContext_->swapchainHeight();
+            if (xrW > 0 && xrH > 0 && (xrW != xrLastSwapchainWidth_ || xrH != xrLastSwapchainHeight_)) {
+                xrLastSwapchainWidth_ = xrW;
+                xrLastSwapchainHeight_ = xrH;
+                Renderer::options.needRecreate = true;
+                if (pipeline_ != nullptr) pipeline_->needRecreate = true;
+            }
+        }
+
+        if (xrContext_->isSessionRunning()) {
+            xrContext_->beginFrame();
+            // Update VRSystem with latest head pose and eye params
+            xrContext_->getHeadPose(vr.headPose);
+            xrContext_->getEyeParams(vr.eyes.data());
+            // Keep config.ipd in sync with runtime-measured eye offsets.
+            vr.config.ipd = glm::distance(vr.eyes[0].positionOffset, vr.eyes[1].positionOffset);
+
+            // Update controller states from input subsystem
+            auto &input = xrContext_->input();
+            for (uint32_t h = 0; h < 2; h++) {
+                auto &src = input.controllers[h];
+                auto &dst = vr.controllers[h];
+                dst.valid = src.valid;
+                dst.position = src.position;
+                dst.orientation = src.orientation;
+                dst.linearVelocity = src.linearVelocity;
+                dst.angularVelocity = src.angularVelocity;
+                dst.triggerValue = src.triggerValue;
+                dst.gripValue = src.gripValue;
+                dst.thumbstick = src.thumbstick;
+                dst.triggerPressed = src.triggerPressed;
+                dst.gripPressed = src.gripPressed;
+                dst.primaryButton = src.primaryButton;
+                dst.secondaryButton = src.secondaryButton;
+                dst.thumbstickClick = src.thumbstickClick;
+                dst.menuButton = src.menuButton;
+            }
+
+            // Update eye gaze point
+            vr.gazeValid = input.gazeValid;
+            vr.gazePoint = input.gazePoint;
+
+            // Performance stats: compositor target
+            int64_t periodNs = xrContext_->predictedDisplayPeriodNs();
+            vr.perfStats.compositorTargetMs = static_cast<float>(periodNs) / 1e6f;
+        } else {
+            vr.enabled = false;
+            vr.eyeCount = 1;
+            vr.headPose = VRHeadPose{};
+        }
+    }
+#endif
+
     std::shared_ptr<FrameworkContext> lastContext;
     if (currentContext_) lastContext = currentContext_;
     VkResult result;
 
     std::shared_ptr<vk::Semaphore> imageAcquiredSemaphore = acquireSemaphore();
     uint32_t imageIndex;
-    result = vkAcquireNextImageKHR(device_->vkDevice(), swapchain_->vkSwapchain(), UINT64_MAX,
+    result = vkAcquireNextImageKHR(device_->vkDevice(), swapchain_->vkSwapchain(),
+                                   5'000'000'000ull,  // 5 second timeout (avoid TDR on alt-tab/minimize)
                                    imageAcquiredSemaphore->vkSemaphore(), VK_NULL_HANDLE, &imageIndex);
-    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_TIMEOUT || result == VK_NOT_READY) {
         recycleSemaphore(imageAcquiredSemaphore);
         recreate();
         return;
@@ -206,7 +385,12 @@ void Framework::acquireContext() {
     }
 
     std::shared_ptr<vk::Fence> fence = contexts_[imageIndex]->commandFinishedFence;
-    result = vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
+    result = vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true,
+                             5'000'000'000ull);  // 5 second timeout
+    if (result == VK_TIMEOUT) {
+        std::cerr << "vkWaitForFences timed out (possible TDR recovery), skipping frame" << std::endl;
+        return;
+    }
     if (result != VK_SUCCESS) {
         std::cout << "vkWaitForFences failed with error: " << std::dec << result << std::endl;
         waitDeviceIdle();
@@ -216,6 +400,23 @@ void Framework::acquireContext() {
     currentContext_ = contexts_[imageIndex];
     indexHistory_.push(imageIndex);
     if (indexHistory_.size() > swapchain_->imageCount()) indexHistory_.pop();
+
+#ifdef MCVR_ENABLE_OPENXR
+    // Read back GPU timestamps from the previous use of this frame slot
+    if (gpuTimestampPool_ != VK_NULL_HANDLE && timestampPeriodNs_ > 0.0f) {
+        uint64_t ts[2] = {0, 0};
+        VkResult tsResult = vkGetQueryPoolResults(
+            device_->vkDevice(), gpuTimestampPool_,
+            imageIndex * 2, 2,
+            sizeof(ts), ts, sizeof(uint64_t),
+            VK_QUERY_RESULT_64_BIT);
+        if (tsResult == VK_SUCCESS && ts[1] > ts[0]) {
+            auto &vr = Renderer::instance().vrSystem();
+            vr.perfStats.gpuFrameTimeMs =
+                static_cast<float>(static_cast<double>(ts[1] - ts[0]) * timestampPeriodNs_ / 1e6);
+        }
+    }
+#endif
 
     if (currentContext_->imageAcquiredSemaphore != VK_NULL_HANDLE) {
         recycleSemaphore(currentContext_->imageAcquiredSemaphore);
@@ -227,6 +428,16 @@ void Framework::acquireContext() {
     currentContext_->worldCommandBuffer->begin();
     currentContext_->overlayCommandBuffer->begin();
     currentContext_->fuseCommandBuffer->begin();
+
+#ifdef MCVR_ENABLE_OPENXR
+    // Reset + write GPU timestamp BEGIN in the first command buffer
+    if (gpuTimestampPool_ != VK_NULL_HANDLE) {
+        VkCommandBuffer cmd = currentContext_->uploadCommandBuffer->vkCommandBuffer();
+        vkCmdResetQueryPool(cmd, gpuTimestampPool_, currentContextIndex_ * 2, 2);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                            gpuTimestampPool_, currentContextIndex_ * 2);
+    }
+#endif
 
     auto pipelineContext = pipeline_->acquirePipelineContext(currentContext_);
     std::shared_ptr<UIModuleContext> lastUIContext =
@@ -243,6 +454,33 @@ void Framework::acquireContext() {
 
     static int frames = 0;
     static auto lastTime = std::chrono::high_resolution_clock::now();
+    static auto lastFrameStart = std::chrono::high_resolution_clock::now();
+
+    auto frameStart = std::chrono::high_resolution_clock::now();
+
+#ifdef MCVR_ENABLE_OPENXR
+    // Track CPU frame time (from previous frame start to this one)
+    if (xrContext_ && Renderer::options.vrEnabled) {
+        auto &vr = Renderer::instance().vrSystem();
+        float cpuMs = std::chrono::duration<float, std::milli>(frameStart - lastFrameStart).count();
+        vr.perfStats.cpuFrameTimeMs = cpuMs;
+        if (cpuMs > 0.0f) {
+            vr.perfStats.fps = 1000.0f / cpuMs;
+        }
+        // Headroom = remaining time relative to compositor target (use max of CPU/GPU)
+        if (vr.perfStats.compositorTargetMs > 0.0f) {
+            float frameMs = std::max(cpuMs, vr.perfStats.gpuFrameTimeMs);
+            vr.perfStats.headroom =
+                (vr.perfStats.compositorTargetMs - frameMs) / vr.perfStats.compositorTargetMs;
+        }
+        // Dropped frames: frame time exceeds target
+        float frameMs = std::max(cpuMs, vr.perfStats.gpuFrameTimeMs);
+        if (frameMs > vr.perfStats.compositorTargetMs && vr.perfStats.compositorTargetMs > 0.0f) {
+            vr.perfStats.droppedFrames++;
+        }
+    }
+    lastFrameStart = frameStart;
+#endif
 
     frames++;
     auto currentTime = std::chrono::high_resolution_clock::now();
@@ -272,7 +510,110 @@ void Framework::submitCommand() {
     if (Renderer::instance().world()->shouldRender()) pipelineContext->worldPipelineContext->render();
     pipelineContext->uiModuleContext->end();
 
+#ifdef MCVR_ENABLE_OPENXR
+    // Blit world render output (array image layers) to XR swapchain images
+    bool xrImagesAcquired = false;
+    if (xrContext_ && xrContext_->isSessionRunning() && xrContext_->shouldRender()) {
+        auto outputImage = pipelineContext->worldPipelineContext->outputImage;
+        if (outputImage) {
+            auto cmdBuf = currentContext_->worldCommandBuffer->vkCommandBuffer();
+            auto mainQueueIndex = physicalDevice_->mainQueueIndex();
+
+            for (uint32_t eye = 0; eye < 2; eye++) {
+                VkImage xrImage = xrContext_->acquireSwapchainImage(eye);
+                if (xrImage == VK_NULL_HANDLE) {
+                    xrImagesAcquired = xrImagesAcquired || (eye > 0);
+                    break;
+                }
+                xrImagesAcquired = true;
+                uint32_t xrW = xrContext_->swapchainWidth();
+                uint32_t xrH = xrContext_->swapchainHeight();
+
+                // Transition XR image to TRANSFER_DST
+                VkImageMemoryBarrier toTransferDst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                toTransferDst.srcAccessMask = 0;
+                toTransferDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                toTransferDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                toTransferDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                toTransferDst.srcQueueFamilyIndex = mainQueueIndex;
+                toTransferDst.dstQueueFamilyIndex = mainQueueIndex;
+                toTransferDst.image = xrImage;
+                toTransferDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                vkCmdPipelineBarrier(cmdBuf,
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    0, 0, nullptr, 0, nullptr, 1, &toTransferDst);
+
+                // Transition source layer to TRANSFER_SRC
+                VkImageMemoryBarrier srcToTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                srcToTransfer.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+                srcToTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                srcToTransfer.oldLayout = outputImage->imageLayout();
+                srcToTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                srcToTransfer.srcQueueFamilyIndex = mainQueueIndex;
+                srcToTransfer.dstQueueFamilyIndex = mainQueueIndex;
+                srcToTransfer.image = outputImage->vkImage();
+                srcToTransfer.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, eye, 1};
+                vkCmdPipelineBarrier(cmdBuf,
+                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    0, 0, nullptr, 0, nullptr, 1, &srcToTransfer);
+
+                // Blit from output array layer to XR swapchain image
+                VkImageBlit blitRegion{};
+                blitRegion.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, eye, 1};
+                blitRegion.srcOffsets[0] = {0, 0, 0};
+                blitRegion.srcOffsets[1] = {
+                    static_cast<int32_t>(outputImage->width()),
+                    static_cast<int32_t>(outputImage->height()), 1};
+                blitRegion.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                blitRegion.dstOffsets[0] = {0, 0, 0};
+                blitRegion.dstOffsets[1] = {static_cast<int32_t>(xrW), static_cast<int32_t>(xrH), 1};
+                vkCmdBlitImage(cmdBuf,
+                    outputImage->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    xrImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    1, &blitRegion, VK_FILTER_LINEAR);
+
+                // Transition XR image to COLOR_ATTACHMENT for the compositor
+                VkImageMemoryBarrier toColorAttach{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                toColorAttach.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                toColorAttach.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+                toColorAttach.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                toColorAttach.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                toColorAttach.srcQueueFamilyIndex = mainQueueIndex;
+                toColorAttach.dstQueueFamilyIndex = mainQueueIndex;
+                toColorAttach.image = xrImage;
+                toColorAttach.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                vkCmdPipelineBarrier(cmdBuf,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    0, 0, nullptr, 0, nullptr, 1, &toColorAttach);
+
+                // Transition source layer back to original layout
+                VkImageMemoryBarrier srcBack{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                srcBack.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                srcBack.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+                srcBack.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                srcBack.newLayout = outputImage->imageLayout();
+                srcBack.srcQueueFamilyIndex = mainQueueIndex;
+                srcBack.dstQueueFamilyIndex = mainQueueIndex;
+                srcBack.image = outputImage->vkImage();
+                srcBack.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, eye, 1};
+                vkCmdPipelineBarrier(cmdBuf,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                    0, 0, nullptr, 0, nullptr, 1, &srcBack);
+            }
+        }
+    }
+#endif
+
     currentContext_->fuseFinal();
+
+#ifdef MCVR_ENABLE_OPENXR
+    // Write GPU timestamp END in the last command buffer
+    if (gpuTimestampPool_ != VK_NULL_HANDLE) {
+        vkCmdWriteTimestamp(currentContext_->fuseCommandBuffer->vkCommandBuffer(),
+                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            gpuTimestampPool_, currentContextIndex_ * 2 + 1);
+    }
+#endif
 
     currentContext_->uploadCommandBuffer->end();
     currentContext_->worldCommandBuffer->end();
@@ -302,6 +643,15 @@ void Framework::submitCommand() {
     std::shared_ptr<vk::Fence> fence = currentContext_->commandFinishedFence;
     vkResetFences(device_->vkDevice(), 1, &fence->vkFence());
     vkQueueSubmit(device_->mainVkQueue(), 1, &vkSubmitInfo, fence->vkFence());
+
+#ifdef MCVR_ENABLE_OPENXR
+    // Release XR swapchain images AFTER GPU commands are submitted
+    if (xrImagesAcquired) {
+        for (uint32_t eye = 0; eye < 2; eye++) {
+            xrContext_->releaseSwapchainImage(eye);
+        }
+    }
+#endif
 }
 
 void Framework::present() {
@@ -317,6 +667,13 @@ void Framework::present() {
     presentInfo.pImageIndices = &currentContext_->frameIndex;
 
     VkResult result = vkQueuePresentKHR(device_->mainVkQueue(), &presentInfo);
+
+#ifdef MCVR_ENABLE_OPENXR
+    // End the XR frame (submit layers to compositor)
+    if (xrContext_ && xrContext_->isSessionRunning()) {
+        xrContext_->endFrame();
+    }
+#endif
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || vk::Window::framebufferResized ||
         Renderer::options.needRecreate || pipeline_->needRecreate) {
@@ -342,7 +699,16 @@ void Framework::recreate() {
 
     int width = 0, height = 0;
     GLFW_GetFramebufferSize(window_->window(), &width, &height);
+    // In VR mode, don't block on minimized window — VR rendering doesn't need the desktop window.
+    // Without this, minimizing/alt-tabbing causes an infinite loop that triggers the watchdog.
+    int waitAttempts = 0;
     while (width == 0 || height == 0) {
+        if (waitAttempts++ > 50) {  // ~5 seconds with typical event wait timing
+            std::cerr << "Window framebuffer still 0x0 after 50 attempts, using fallback size" << std::endl;
+            width = 1;
+            height = 1;
+            break;
+        }
         GLFW_GetFramebufferSize(window_->window(), &width, &height);
         GLFW_WaitEvents();
     }
@@ -397,8 +763,50 @@ void Framework::waitBackendQueueIdle() {
 
 void Framework::close() {
     if (running_) { pipeline_->close(); }
+#ifdef MCVR_ENABLE_OPENXR
+    if (gpuTimestampPool_ != VK_NULL_HANDLE) {
+        vkDestroyQueryPool(device_->vkDevice(), gpuTimestampPool_, nullptr);
+        gpuTimestampPool_ = VK_NULL_HANDLE;
+    }
+    if (xrContext_) { xrContext_->shutdown(); xrContext_.reset(); }
+#endif
     running_ = false;
 }
+
+#ifdef MCVR_ENABLE_OPENXR
+bool Framework::startXRSession() {
+    if (!running_ || xrContext_ == nullptr) return false;
+    if (!Renderer::options.vrEnabled) return false;
+
+    auto &vr = Renderer::instance().vrSystem();
+    vr.worldOrientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    vr.worldPosition = glm::vec3(0.0f);
+
+    bool ok = xrContext_->requestSessionStart();
+    Renderer::options.needRecreate = true;
+    if (pipeline_ != nullptr) pipeline_->needRecreate = true;
+    return ok;
+}
+
+void Framework::stopXRSession() {
+    if (!running_ || xrContext_ == nullptr) return;
+
+    xrContext_->requestSessionStop();
+    auto &vr = Renderer::instance().vrSystem();
+    vr.enabled = false;
+    vr.eyeCount = 1;
+    vr.headPose = VRHeadPose{};
+    vr.worldOrientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    vr.worldPosition = glm::vec3(0.0f);
+
+    Renderer::options.needRecreate = true;
+    if (pipeline_ != nullptr) pipeline_->needRecreate = true;
+}
+
+bool Framework::isXRSessionRunning() const {
+    return xrContext_ != nullptr && xrContext_->isSessionRunning();
+}
+#endif
 
 bool Framework::isRunning() {
     return running_;

@@ -78,6 +78,12 @@ layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer Ind
 }
 indexBuffer;
 
+layout(push_constant) uniform PushConstant {
+    int numRayBounces;
+    int useJitter;
+    uint eyeIndex;
+} pc;
+
 layout(location = 0) rayPayloadInEXT PrimaryRay mainRay;
 hitAttributeEXT vec2 attribs;
 
@@ -159,8 +165,10 @@ void main() {
     vec3 localPos = baryCoords.x * v0.pos + baryCoords.y * v1.pos + baryCoords.z * v2.pos;
     vec3 worldPos = vec4(localPos, 1.0) * gl_ObjectToWorld3x4EXT;
 
+    mat4 eyeProj = worldUbo.eyeProjOffsets[pc.eyeIndex] * worldUbo.cameraProjMat;
+    mat4 eyeView = worldUbo.eyeViewOffsets[pc.eyeIndex] * worldUbo.cameraEffectedViewMat;
     vec4 texProj0 =
-        projection_from_position(worldUbo.cameraProjMat * worldUbo.cameraEffectedViewMat * vec4(worldPos, 1.0));
+        projection_from_position(eyeProj * eyeView * vec4(worldPos, 1.0));
     vec3 color = vec3(0.0);
     if (worldUbo.endSkyTextureID >= 0)
         color += textureProj(textures[nonuniformEXT(worldUbo.endSkyTextureID)], texProj0).rgb * COLORS[0];

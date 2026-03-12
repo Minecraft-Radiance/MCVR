@@ -66,6 +66,10 @@ static VkImageSubresourceLayers wholeStencilSubresourceLayers = {
     .layerCount = VK_REMAINING_ARRAY_LAYERS,
 };
 
+static inline VkImageSubresourceRange colorSubresourceRangeForLayer(uint32_t layer) {
+    return {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, layer, 1};
+}
+
 class Image {
   public:
     virtual uint32_t width() = 0;
@@ -166,6 +170,11 @@ class DeviceLocalImage : public Image, public SharedObject<DeviceLocalImage> {
     void *mappedPtr();
 
     void addImageView(VkImageViewCreateInfo info);
+
+    // Create per-layer views for stereo rendering (one 2D view per array layer)
+    void createPerLayerViews();
+    // Get per-layer view index (1-based: viewIndex = 1 + layerIndex)
+    VkImageView perLayerView(uint32_t layerIndex);
 
   private:
     std::shared_ptr<Device> device_;

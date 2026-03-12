@@ -12,6 +12,10 @@ layout(set = 1, binding = 1) uniform SkyUniform {
     SkyUBO skyUBO;
 };
 
+layout(push_constant) uniform PushConstant {
+    uint eyeIndex;
+} pc;
+
 layout(location = 0) in vec3 inPos;
 layout(location = 4) in vec4 inColorLayer;
 
@@ -45,7 +49,7 @@ void main() {
     mat3 R = rotationFromXToDir(skyUBO.sunDirection);
     vec3 pos = R * inPos;
     outPos = pos;
-    gl_Position = worldUBO.cameraProjMat * worldUBO.cameraEffectedViewMat * vec4(pos, 1.0);
+    gl_Position = worldUBO.eyeProjOffsets[pc.eyeIndex] * worldUBO.cameraProjMat * (worldUBO.eyeViewOffsets[pc.eyeIndex] * worldUBO.cameraEffectedViewMat) * vec4(pos, 1.0);
 
     float vis = starVisibilityFromSunY(skyUBO.sunDirection.y);
     outColorLayer = vec4(inColorLayer.rgb * vis, vis);

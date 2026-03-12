@@ -22,6 +22,7 @@ class WorldPrepareContext;
 struct RayTracingPushConstant {
     int numRayBounces;
     int useJitter;
+    uint32_t eyeIndex;
 };
 
 class RayTracingModule : public WorldModule, public SharedObject<RayTracingModule> {
@@ -56,11 +57,14 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
 
     void preClose() override;
 
+    StereoMode stereoMode() const override { return StereoMode::SingleInstance3DDispatch; }
+
   private:
     void initDescriptorTables();
     void initImages();
     void initPipeline();
     void initSBT();
+    void createVisibilityMaskImage();
 
   private:
     // input
@@ -104,7 +108,8 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::shared_ptr<vk::Shader> worldLightMapVertShader_;
     std::shared_ptr<vk::Shader> worldLightMapFragShader_;
 
-    std::vector<std::shared_ptr<vk::DescriptorTable>> rayTracingDescriptorTables_;
+    // rayTracingDescriptorTables_[frameIndex][eyeIndex]
+    std::vector<std::vector<std::shared_ptr<vk::DescriptorTable>>> rayTracingDescriptorTables_;
     std::shared_ptr<vk::RayTracingPipeline> rayTracingPipeline_;
     std::vector<std::shared_ptr<vk::SBT>> sbts_;
 
@@ -127,6 +132,9 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> firstHitBaseEmissionImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> directLightDepthImages_;
 
+    // visibility mask (static, shared across frames)
+    std::shared_ptr<vk::DeviceLocalImage> visMaskImage_;
+
     // submodules
     std::shared_ptr<Atmosphere> atmosphere_;
     std::shared_ptr<WorldPrepare> worldPrepare_;
@@ -141,7 +149,8 @@ struct RayTracingModuleContext : public WorldModuleContext, SharedObject<RayTrac
     // none
 
     // ray tracing
-    std::shared_ptr<vk::DescriptorTable> rayTracingDescriptorTable;
+    // rayTracingDescriptorTables[eyeIndex]
+    std::vector<std::shared_ptr<vk::DescriptorTable>> rayTracingDescriptorTables;
     std::shared_ptr<vk::SBT> sbt;
 
     // output
@@ -168,5 +177,7 @@ struct RayTracingModuleContext : public WorldModuleContext, SharedObject<RayTrac
                             std::shared_ptr<WorldPipelineContext> worldPipelineContext,
                             std::shared_ptr<RayTracingModule> rayTracingModule);
 
+    StereoMode stereoMode() const override { return StereoMode::SingleInstance3DDispatch; }
     void render() override;
+    void render3D(uint32_t eyeCount) override;
 };

@@ -66,6 +66,8 @@ class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingMod
 
     void preClose() override;
 
+    StereoMode stereoMode() const override { return StereoMode::SingleInstance3DDispatch; }
+
   private:
     static constexpr uint32_t histSize = 256;
 
@@ -116,12 +118,15 @@ class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingMod
 struct ToneMappingModuleContext : public WorldModuleContext, SharedObject<ToneMappingModuleContext> {
     std::weak_ptr<ToneMappingModule> toneMappingModule;
 
+    StereoMode stereoMode() const override { return StereoMode::SingleInstance3DDispatch; }
+    void render3D(uint32_t eyeCount) override;
+
     // input
     std::shared_ptr<vk::DeviceLocalImage> hdrImage;
 
-    // tone mapping
-    std::shared_ptr<vk::DescriptorTable> descriptorTable;
-    std::shared_ptr<vk::Framebuffer> framebuffer;
+    // tone mapping (per-eye indexed)
+    std::vector<std::shared_ptr<vk::DescriptorTable>> descriptorTables;
+    std::vector<std::shared_ptr<vk::Framebuffer>> framebuffers;
     std::shared_ptr<vk::DeviceLocalBuffer> histBuffer;
 
     // output
@@ -132,4 +137,7 @@ struct ToneMappingModuleContext : public WorldModuleContext, SharedObject<ToneMa
                              std::shared_ptr<ToneMappingModule> toneMappingModule);
 
     void render() override;
+
+  private:
+    uint32_t eyeCount_;
 };
