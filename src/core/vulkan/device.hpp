@@ -2,6 +2,9 @@
 
 #include "core/all_extern.hpp"
 
+#include <string>
+#include <vector>
+
 namespace vk {
 class Instance;
 class Window;
@@ -9,6 +12,9 @@ class PhysicalDevice;
 
 class Device : public SharedObject<Device> {
   public:
+    // Extra device extensions to enable (set before create(), e.g. by OpenXR).
+    static std::vector<std::string> extraExtensions;
+
     Device(std::shared_ptr<Instance> instance,
            std::shared_ptr<Window> window,
            std::shared_ptr<PhysicalDevice> physicalDevice);

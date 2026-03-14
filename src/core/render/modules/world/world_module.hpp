@@ -14,6 +14,12 @@ struct WorldPipelineContext;
 
 struct WorldModuleContext;
 
+enum class StereoMode {
+    SingleInstance3DDispatch,
+    SingleInstanceMultiDispatch,
+    DualInstance
+};
+
 class WorldModule {
   public:
     WorldModule();
@@ -35,10 +41,14 @@ class WorldModule {
     virtual void
     bindTexture(std::shared_ptr<vk::Sampler> sampler, std::shared_ptr<vk::DeviceLocalImage> image, int index) = 0;
 
-    // release resources that must be released before deconstruction
     virtual void preClose() = 0;
 
+    virtual StereoMode stereoMode() const { return StereoMode::SingleInstance3DDispatch; }
+    virtual uint32_t eyeCount() const { return eyeCount_; }
+    virtual void setEyeCount(uint32_t count) { eyeCount_ = count; }
+
   protected:
+    uint32_t eyeCount_ = 1;
     std::weak_ptr<Framework> framework_;
     std::weak_ptr<WorldPipeline> worldPipeline_;
 };
@@ -50,5 +60,11 @@ struct WorldModuleContext {
     WorldModuleContext(std::shared_ptr<FrameworkContext> frameworkContext,
                        std::shared_ptr<WorldPipelineContext> worldPipelineContext);
 
+    virtual StereoMode stereoMode() const { return StereoMode::SingleInstance3DDispatch; }
+
     virtual void render() = 0;
+    virtual void render3D(uint32_t eyeCount) { render(); }
+    virtual void renderEye(uint32_t eyeIndex) { currentEyeIndex = eyeIndex; render(); }
+
+    uint32_t currentEyeIndex = 0;
 };

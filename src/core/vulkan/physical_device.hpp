@@ -15,6 +15,9 @@ class PhysicalDevice : public SharedObject<PhysicalDevice> {
     uint32_t mainQueueIndex();
     uint32_t secondaryQueueIndex();
 
+    // If set, use this physical device instead of auto-selecting (e.g. OpenXR override).
+    static VkPhysicalDevice overrideDevice;
+
     void findPhysicalDevice();
     void findQueueFamilies();
 

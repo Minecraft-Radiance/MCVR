@@ -10,7 +10,7 @@
 
 struct WorldPipelineBuildParams {
     int moduleCount;
-    int padding;
+    int eyeCount;
     char **moduleNames;
     int *imageFormats;
     int **inputIndices;
@@ -39,6 +39,7 @@ class WorldPipelineBlueprint : public SharedObject<WorldPipelineBlueprint> {
     WorldPipelineBlueprint(WorldPipelineBuildParams *params);
 
   private:
+    uint32_t eyeCount_ = 1;
     std::vector<std::string> moduleNames_;
     std::vector<std::vector<uint32_t>> modulesInputIndices_;
     std::vector<std::vector<uint32_t>> modulesOutputIndices_;
@@ -58,12 +59,14 @@ class WorldPipeline : public SharedObject<WorldPipeline> {
 
     std::vector<std::shared_ptr<WorldModule>> &worldModules();
     std::vector<std::shared_ptr<WorldPipelineContext>> &contexts();
+    uint32_t eyeCount() const { return eyeCount_; }
 
     void bindTexture(std::shared_ptr<vk::Sampler> sampler, std::shared_ptr<vk::DeviceLocalImage> image, int index);
 
   private:
     void dumpSharedImages(const char *label) const;
 
+    uint32_t eyeCount_ = 1;
     std::vector<std::shared_ptr<WorldModule>> worldModules_;
     std::vector<std::vector<std::shared_ptr<vk::DeviceLocalImage>>> sharedImages_;
 
@@ -74,6 +77,7 @@ struct WorldPipelineContext : public SharedObject<WorldPipelineContext> {
     std::weak_ptr<FrameworkContext> frameworkContext;
     std::weak_ptr<WorldPipeline> worldPipeline;
 
+    uint32_t eyeCount_ = 1;
     std::shared_ptr<vk::DeviceLocalImage> outputImage;
     std::vector<std::shared_ptr<WorldModuleContext>> worldModuleContexts;
 

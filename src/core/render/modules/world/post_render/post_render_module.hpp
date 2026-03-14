@@ -13,6 +13,10 @@ class FrameworkContext;
 class WorldPipeline;
 struct WorldModuleContext;
 
+struct PostRenderPushConstant {
+    uint32_t eyeIndex;
+};
+
 struct PostRenderModuleContext;
 
 class PostRenderModule : public WorldModule, public SharedObject<PostRenderModule> {
@@ -44,6 +48,8 @@ class PostRenderModule : public WorldModule, public SharedObject<PostRenderModul
     bindTexture(std::shared_ptr<vk::Sampler> sampler, std::shared_ptr<vk::DeviceLocalImage> image, int index) override;
 
     void preClose() override;
+
+    StereoMode stereoMode() const override { return StereoMode::SingleInstance3DDispatch; }
 
   private:
     static constexpr uint32_t histSize = 256;
@@ -105,17 +111,20 @@ class PostRenderModule : public WorldModule, public SharedObject<PostRenderModul
 struct PostRenderModuleContext : public WorldModuleContext, SharedObject<PostRenderModuleContext> {
     std::weak_ptr<PostRenderModule> postRenderModule;
 
+    StereoMode stereoMode() const override { return StereoMode::SingleInstance3DDispatch; }
+    void render3D(uint32_t eyeCount) override;
+
     // input
     std::shared_ptr<vk::DeviceLocalImage> ldrImage;
     std::shared_ptr<vk::DeviceLocalImage> firstHitDepthImage;
 
-    // post render
+    // post render (per-eye indexed)
     std::shared_ptr<vk::DeviceLocalImage> worldLightMapImage;
-    std::shared_ptr<vk::DeviceLocalImage> worldPostDepthImage;
-    std::shared_ptr<vk::DescriptorTable> descriptorTable;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> worldPostDepthImages;
+    std::vector<std::shared_ptr<vk::DescriptorTable>> descriptorTables;
     std::shared_ptr<vk::Framebuffer> worldLightMapFramebuffer;
-    std::shared_ptr<vk::Framebuffer> worldPostColorToDepthFramebuffer;
-    std::shared_ptr<vk::Framebuffer> worldPostFramebuffer;
+    std::vector<std::shared_ptr<vk::Framebuffer>> worldPostColorToDepthFramebuffers;
+    std::vector<std::shared_ptr<vk::Framebuffer>> worldPostFramebuffers;
 
     // output
     std::shared_ptr<vk::DeviceLocalImage> postRenderedImage;
@@ -125,4 +134,7 @@ struct PostRenderModuleContext : public WorldModuleContext, SharedObject<PostRen
                             std::shared_ptr<PostRenderModule> postRenderModule);
 
     void render() override;
+
+  private:
+    uint32_t eyeCount_;
 };

@@ -353,13 +353,18 @@ DlssRR::~DlssRR() {
     assert(!m_dlssdHandle && "Must call deinit");
 }
 
-void DlssRR::setResource(DlssResource resourceId, std::shared_ptr<vk::DeviceLocalImage> image) {
+void DlssRR::setResource(DlssResource resourceId, std::shared_ptr<vk::DeviceLocalImage> image, uint32_t viewIndex) {
     assert(m_dlssdHandle);
 
     VkExtent2D size = resourceId == RESOURCE_COLOR_OUT ? m_outputSize : m_inputSize;
 
+    VkImageSubresourceRange range = vk::wholeColorSubresourceRange;
+    if (viewIndex > 0) {
+        range = vk::colorSubresourceRangeForLayer(viewIndex - 1);
+    }
+
     NVSDK_NGX_Resource_VK resource = NVSDK_NGX_Create_ImageView_Resource_VK(
-        image->vkImageView(), image->vkImage(), vk::wholeColorSubresourceRange, image->vkFormat(), size.width,
+        image->vkImageView(viewIndex), image->vkImage(), range, image->vkFormat(), size.width,
         size.height, resourceId == RESOURCE_COLOR_OUT /*readWrite*/);
 
     m_resources[resourceId] = resource;

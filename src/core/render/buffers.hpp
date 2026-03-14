@@ -51,6 +51,8 @@ class Buffers : public SharedObject<Buffers> {
     std::shared_ptr<vk::HostVisibleBuffer> lightMapUniformBuffer();
 
     void setUseJitter(bool useJitter);
+    void setFoveatedInnerRadius(float radius);
+    void setFoveatedOuterBlockSize(uint32_t blockSize);
 
   private:
     static constexpr uint32_t baseBlockSize = 16 * 1024;
@@ -74,4 +76,6 @@ class Buffers : public SharedObject<Buffers> {
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> importantIndexVertexBuffer_;
 
     bool useJitter_ = true;
+    float foveatedInnerRadius_ = 1.0f;
+    uint32_t foveatedOuterBlockSize_ = 2;
 };

@@ -27,8 +27,9 @@ bool TemporalAccumulationModule::setOrCreateInputImages(std::vector<std::shared_
     auto framework = framework_.lock();
     if (images[0] == nullptr) {
         hdrNoisyImages_[frameIndex] = images[0] = vk::DeviceLocalImage::create(
-            framework->device(), framework->vma(), false, width_, height_, 1, formats[0],
+            framework->device(), framework->vma(), false, width_, height_, eyeCount_, formats[0],
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        if (eyeCount_ > 1) images[0]->createPerLayerViews();
     } else {
         if (images[0]->width() != width_ || images[0]->height() != height_) return false;
         hdrNoisyImages_[frameIndex] = images[0];
@@ -36,8 +37,9 @@ bool TemporalAccumulationModule::setOrCreateInputImages(std::vector<std::shared_
 
     if (images[1] == nullptr) {
         motionVectorImages_[frameIndex] = images[1] = vk::DeviceLocalImage::create(
-            framework->device(), framework->vma(), false, width_, height_, 1, formats[1],
+            framework->device(), framework->vma(), false, width_, height_, eyeCount_, formats[1],
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        if (eyeCount_ > 1) images[1]->createPerLayerViews();
     } else {
         if (images[1]->width() != width_ || images[1]->height() != height_) return false;
         motionVectorImages_[frameIndex] = images[1];
@@ -45,8 +47,9 @@ bool TemporalAccumulationModule::setOrCreateInputImages(std::vector<std::shared_
 
     if (images[2] == nullptr) {
         normalRoughnessImages_[frameIndex] = images[2] = vk::DeviceLocalImage::create(
-            framework->device(), framework->vma(), false, width_, height_, 1, formats[2],
+            framework->device(), framework->vma(), false, width_, height_, eyeCount_, formats[2],
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        if (eyeCount_ > 1) images[2]->createPerLayerViews();
     } else {
         if (images[2]->width() != width_ || images[2]->height() != height_) return false;
         normalRoughnessImages_[frameIndex] = images[2];
@@ -102,10 +105,11 @@ void TemporalAccumulationModule::preClose() {}
 void TemporalAccumulationModule::initDescriptorTables() {
     auto framework = framework_.lock();
     uint32_t size = framework->swapchain()->imageCount();
+    uint32_t totalCtx = size * eyeCount_;
 
-    descriptorTables_.resize(size);
+    descriptorTables_.resize(totalCtx);
 
-    for (int i = 0; i < size; i++) {
+    for (uint32_t i = 0; i < totalCtx; i++) {
         descriptorTables_[i] = vk::DescriptorTableBuilder{}
                                    .beginDescriptorLayoutSet() // set 0
                                    .beginDescriptorLayoutSetBinding()
@@ -156,28 +160,40 @@ void TemporalAccumulationModule::initDescriptorTables() {
 void TemporalAccumulationModule::initImages() {
     auto framework = framework_.lock();
     uint32_t size = framework->swapchain()->imageCount();
+    uint32_t totalCtx = size * eyeCount_;
 
     accumulatedRadianceImage_ = vk::DeviceLocalImage::create(
-        framework->device(), framework->vma(), false, hdrNoisyImages_[0]->width(), hdrNoisyImages_[0]->height(), 1,
-        hdrNoisyImages_[0]->vkFormat(),
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        framework->device(), framework->vma(), false, hdrNoisyImages_[0]->width(), hdrNoisyImages_[0]->height(),
+        eyeCount_, hdrNoisyImages_[0]->vkFormat(),
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    if (eyeCount_ > 1) accumulatedRadianceImage_->createPerLayerViews();
 
     accumulatedNormalImage_ = vk::DeviceLocalImage::create(
-        framework->device(), framework->vma(), false, hdrNoisyImages_[0]->width(), hdrNoisyImages_[0]->height(), 1,
-        normalRoughnessImages_[0]->vkFormat(),
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        framework->device(), framework->vma(), false, hdrNoisyImages_[0]->width(), hdrNoisyImages_[0]->height(),
+        eyeCount_, normalRoughnessImages_[0]->vkFormat(),
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    if (eyeCount_ > 1) accumulatedNormalImage_->createPerLayerViews();
 
-    for (int i = 0; i < size; i++) {
-        descriptorTables_[i]->bindSamplerImageForShader(sampler_, hdrNoisyImages_[i], 0, 0);
-        descriptorTables_[i]->bindSamplerImageForShader(sampler_, accumulatedRadianceImage_, 0, 1);
-        descriptorTables_[i]->bindSamplerImageForShader(sampler_, motionVectorImages_[i], 0, 2);
-        descriptorTables_[i]->bindSamplerImageForShader(sampler_, normalRoughnessImages_[i], 0, 3);
-        descriptorTables_[i]->bindSamplerImageForShader(sampler_, accumulatedNormalImage_, 0, 4);
+    accumulatedNormalOutImages_.resize(totalCtx);
+
+    for (uint32_t i = 0; i < totalCtx; i++) {
+        uint32_t frameIdx = i / eyeCount_;
+        uint32_t eyeIdx = i % eyeCount_;
+        uint32_t viewIdx = (eyeCount_ > 1) ? (1 + eyeIdx) : 0;
+
+        descriptorTables_[i]->bindSamplerImageForShader(sampler_, hdrNoisyImages_[frameIdx], 0, 0, viewIdx);
+        descriptorTables_[i]->bindSamplerImageForShader(sampler_, accumulatedRadianceImage_, 0, 1, viewIdx);
+        descriptorTables_[i]->bindSamplerImageForShader(sampler_, motionVectorImages_[frameIdx], 0, 2, viewIdx);
+        descriptorTables_[i]->bindSamplerImageForShader(sampler_, normalRoughnessImages_[frameIdx], 0, 3, viewIdx);
+        descriptorTables_[i]->bindSamplerImageForShader(sampler_, accumulatedNormalImage_, 0, 4, viewIdx);
 
         accumulatedNormalOutImages_[i] = vk::DeviceLocalImage::create(
             framework->device(), framework->vma(), false, hdrNoisyImages_[0]->width(), hdrNoisyImages_[0]->height(), 1,
             normalRoughnessImages_[0]->vkFormat(),
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     }
 }
 
@@ -225,13 +241,18 @@ void TemporalAccumulationModule::initRenderPass() {
 void TemporalAccumulationModule::initFrameBuffers() {
     auto framework = framework_.lock();
     uint32_t size = framework->swapchain()->imageCount();
+    uint32_t totalCtx = size * eyeCount_;
 
-    framebuffers_.resize(size);
+    framebuffers_.resize(totalCtx);
 
-    for (int i = 0; i < size; i++) {
+    for (uint32_t i = 0; i < totalCtx; i++) {
+        uint32_t frameIdx = i / eyeCount_;
+        uint32_t eyeIdx = i % eyeCount_;
+        int viewIdx = (eyeCount_ > 1) ? static_cast<int>(1 + eyeIdx) : 0;
+
         framebuffers_[i] = vk::FramebufferBuilder{}
                                .beginAttachment()
-                               .defineAttachment(accumulatedRadianceOutImages_[i])
+                               .defineAttachment(accumulatedRadianceOutImages_[frameIdx], viewIdx)
                                .defineAttachment(accumulatedNormalOutImages_[i])
                                .endAttachment()
                                .build(framework->device(), renderPass_);
@@ -240,6 +261,12 @@ void TemporalAccumulationModule::initFrameBuffers() {
 
 void TemporalAccumulationModule::initPipeline() {
     auto framework = framework_.lock();
+    uint32_t targetWidth = framework->swapchain()->vkExtent().width;
+    uint32_t targetHeight = framework->swapchain()->vkExtent().height;
+    if (!accumulatedRadianceOutImages_.empty() && accumulatedRadianceOutImages_[0] != nullptr) {
+        targetWidth = accumulatedRadianceOutImages_[0]->width();
+        targetHeight = accumulatedRadianceOutImages_[0]->height();
+    }
     std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
     vertShader_ =
         vk::Shader::create(framework->device(), (shaderPath / "world/temporal_accumulation/tmp_acc_vert.spv").string());
@@ -258,15 +285,15 @@ void TemporalAccumulationModule::initPipeline() {
                             {
                                 .x = 0,
                                 .y = 0,
-                                .width = static_cast<float>(framework->swapchain()->vkExtent().width),
-                                .height = static_cast<float>(framework->swapchain()->vkExtent().height),
+                                .width = static_cast<float>(targetWidth),
+                                .height = static_cast<float>(targetHeight),
                                 .minDepth = 0.0,
                                 .maxDepth = 1.0,
                             },
                         .scissor =
                             {
                                 .offset = {.x = 0, .y = 0},
-                                .extent = framework->swapchain()->vkExtent(),
+                                .extent = {targetWidth, targetHeight},
                             },
                     })
                     .defineDepthStencilState({
@@ -291,31 +318,38 @@ TemporalAccumulationModuleContext::TemporalAccumulationModuleContext(
       temporalAccumulationModule(temporalAccumulationModule),
       hdrNoisyImage(temporalAccumulationModule->hdrNoisyImages_[frameworkContext->frameIndex]),
       motionVectorImage(temporalAccumulationModule->motionVectorImages_[frameworkContext->frameIndex]),
-      descriptorTable(temporalAccumulationModule->descriptorTables_[frameworkContext->frameIndex]),
-      framebuffer(temporalAccumulationModule->framebuffers_[frameworkContext->frameIndex]),
+      descriptorTable(temporalAccumulationModule->descriptorTables_[frameworkContext->frameIndex * temporalAccumulationModule->eyeCount()]),
+      framebuffer(temporalAccumulationModule->framebuffers_[frameworkContext->frameIndex * temporalAccumulationModule->eyeCount()]),
       accumulatedRadianceImage(temporalAccumulationModule->accumulatedRadianceImage_),
       accumulatedNormalImage(temporalAccumulationModule->accumulatedNormalImage_),
-      accumulatedNormalOutImage(temporalAccumulationModule->accumulatedNormalOutImages_[frameworkContext->frameIndex]),
+      accumulatedNormalOutImage(temporalAccumulationModule->accumulatedNormalOutImages_[frameworkContext->frameIndex * temporalAccumulationModule->eyeCount()]),
       accumulatedRadianceOutImage(
           temporalAccumulationModule->accumulatedRadianceOutImages_[frameworkContext->frameIndex]) {}
 
 void TemporalAccumulationModuleContext::render() {
+    renderEye(0);
+}
+
+void TemporalAccumulationModuleContext::renderEye(uint32_t eyeIndex) {
     auto context = frameworkContext.lock();
     auto framework = context->framework.lock();
     auto worldCommandBuffer = context->worldCommandBuffer;
     auto mainQueueIndex = framework->physicalDevice()->mainQueueIndex();
 
     auto module = temporalAccumulationModule.lock();
+    uint32_t dtIdx = context->frameIndex * module->eyeCount() + eyeIndex;
+
+    auto eyeDT = module->descriptorTables_[dtIdx];
+    auto eyeFB = module->framebuffers_[dtIdx];
+    auto eyeNormalOut = module->accumulatedNormalOutImages_[dtIdx];
 
     TemporalAccumulationPushConstant pc{};
     pc.alpha = module->alpha_;
     pc.threshold = module->threshould_;
 
-    vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), descriptorTable->vkPipelineLayout(),
-                       VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
-                           VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
-                           VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
-                       0, sizeof(uint32_t), &pc);
+    vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), eyeDT->vkPipelineLayout(),
+                       VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(TemporalAccumulationPushConstant), &pc);
 
     worldCommandBuffer->barriersBufferImage(
         {}, {{
@@ -379,14 +413,14 @@ void TemporalAccumulationModuleContext::render() {
 
     worldCommandBuffer->beginRenderPass({
         .renderPass = module->renderPass_,
-        .framebuffer = framebuffer,
+        .framebuffer = eyeFB,
         .renderAreaExtent = {accumulatedRadianceOutImage->width(), accumulatedRadianceOutImage->height()},
         .clearValues = {{.color = {0.1f, 0.1f, 0.1f, 1.0f}}, {.depthStencil = {.depth = 1.0f}}},
     });
     accumulatedRadianceOutImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     worldCommandBuffer->bindGraphicsPipeline(module->pipeline_)
-        ->bindDescriptorTable(descriptorTable, VK_PIPELINE_BIND_POINT_GRAPHICS)
+        ->bindDescriptorTable(eyeDT, VK_PIPELINE_BIND_POINT_GRAPHICS)
         ->draw(3, 1)
         ->endRenderPass();
     accumulatedRadianceOutImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
@@ -413,11 +447,11 @@ void TemporalAccumulationModuleContext::render() {
                  .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
                                  VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                  .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .oldLayout = accumulatedNormalOutImage->imageLayout(),
+                 .oldLayout = eyeNormalOut->imageLayout(),
                  .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                  .srcQueueFamilyIndex = mainQueueIndex,
                  .dstQueueFamilyIndex = mainQueueIndex,
-                 .image = accumulatedNormalOutImage,
+                 .image = eyeNormalOut,
                  .subresourceRange = vk::wholeColorSubresourceRange,
              },
              {
@@ -445,23 +479,23 @@ void TemporalAccumulationModuleContext::render() {
                  .subresourceRange = vk::wholeColorSubresourceRange,
              }});
     accumulatedRadianceOutImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    accumulatedNormalOutImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    eyeNormalOut->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     accumulatedRadianceImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     accumulatedNormalImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 
-    // TODO: add to command buffer
+    // blit accumulatedRadianceOutImage layer[eyeIndex] → accumulatedRadianceImage layer[eyeIndex]
     {
         VkImageBlit imageBlit{};
         imageBlit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         imageBlit.srcSubresource.mipLevel = 0;
-        imageBlit.srcSubresource.baseArrayLayer = 0;
+        imageBlit.srcSubresource.baseArrayLayer = eyeIndex;
         imageBlit.srcSubresource.layerCount = 1;
         imageBlit.srcOffsets[0] = {0, 0, 0};
         imageBlit.srcOffsets[1] = {static_cast<int>(accumulatedRadianceOutImage->width()),
                                    static_cast<int>(accumulatedRadianceOutImage->height()), 1};
         imageBlit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         imageBlit.dstSubresource.mipLevel = 0;
-        imageBlit.dstSubresource.baseArrayLayer = 0;
+        imageBlit.dstSubresource.baseArrayLayer = eyeIndex;
         imageBlit.dstSubresource.layerCount = 1;
         imageBlit.dstOffsets[0] = {0, 0, 0};
         imageBlit.dstOffsets[1] = {static_cast<int>(accumulatedRadianceImage->width()),
@@ -472,6 +506,7 @@ void TemporalAccumulationModuleContext::render() {
                        accumulatedRadianceImage->imageLayout(), 1, &imageBlit, VK_FILTER_LINEAR);
     }
 
+    // blit eyeNormalOut (single-layer) → accumulatedNormalImage layer[eyeIndex]
     {
         VkImageBlit imageBlit{};
         imageBlit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -479,18 +514,18 @@ void TemporalAccumulationModuleContext::render() {
         imageBlit.srcSubresource.baseArrayLayer = 0;
         imageBlit.srcSubresource.layerCount = 1;
         imageBlit.srcOffsets[0] = {0, 0, 0};
-        imageBlit.srcOffsets[1] = {static_cast<int>(accumulatedNormalOutImage->width()),
-                                   static_cast<int>(accumulatedNormalOutImage->height()), 1};
+        imageBlit.srcOffsets[1] = {static_cast<int>(eyeNormalOut->width()),
+                                   static_cast<int>(eyeNormalOut->height()), 1};
         imageBlit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         imageBlit.dstSubresource.mipLevel = 0;
-        imageBlit.dstSubresource.baseArrayLayer = 0;
+        imageBlit.dstSubresource.baseArrayLayer = eyeIndex;
         imageBlit.dstSubresource.layerCount = 1;
         imageBlit.dstOffsets[0] = {0, 0, 0};
         imageBlit.dstOffsets[1] = {static_cast<int>(accumulatedNormalImage->width()),
                                    static_cast<int>(accumulatedNormalImage->height()), 1};
 
-        vkCmdBlitImage(worldCommandBuffer->vkCommandBuffer(), accumulatedNormalOutImage->vkImage(),
-                       accumulatedNormalOutImage->imageLayout(), accumulatedNormalImage->vkImage(),
+        vkCmdBlitImage(worldCommandBuffer->vkCommandBuffer(), eyeNormalOut->vkImage(),
+                       eyeNormalOut->imageLayout(), accumulatedNormalImage->vkImage(),
                        accumulatedNormalImage->imageLayout(), 1, &imageBlit, VK_FILTER_LINEAR);
     }
 }

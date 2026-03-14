@@ -62,20 +62,21 @@ layout(set = 2, binding = 3) uniform LightMapUniform {
     LightMapUBO lightMapUBO;
 };
 
-layout(set = 3, binding = 0, rgba16f) uniform image2D outputImage;
-layout(set = 3, binding = 1, rgba8) uniform image2D diffuseAlbedoImage;
-layout(set = 3, binding = 2, rgba8) uniform image2D specularAlbedoImage;
-layout(set = 3, binding = 3, rgba16f) uniform image2D normalRoughnessImage;
-layout(set = 3, binding = 4, rg16f) uniform image2D motionVectorImage;
-layout(set = 3, binding = 5, r16f) uniform image2D linearDepthImage;
-layout(set = 3, binding = 6, r16f) uniform image2D specularHitDepthImage;
-layout(set = 3, binding = 7, r16f) uniform image2D firstHitDepthImage;
-layout(set = 3, binding = 8, rgba16f) uniform image2D firstHitDiffuseDirectLightImage;
-layout(set = 3, binding = 9, rgba16f) uniform image2D firstHitDiffuseIndirectLightImage;
-layout(set = 3, binding = 10, rgba16f) uniform image2D firstHitSpecularImage;
-layout(set = 3, binding = 11, rgba16f) uniform image2D firstHitClearImage;
-layout(set = 3, binding = 12, rgba16f) uniform image2D firstHitBaseEmissionImage;
-layout(set = 3, binding = 13, r16f) uniform image2D directLightDepthImage;
+layout(set = 3, binding = 0, rgba16f) uniform image2DArray outputImage;
+layout(set = 3, binding = 1, rgba8) uniform image2DArray diffuseAlbedoImage;
+layout(set = 3, binding = 2, rgba8) uniform image2DArray specularAlbedoImage;
+layout(set = 3, binding = 3, rgba16f) uniform image2DArray normalRoughnessImage;
+layout(set = 3, binding = 4, rg16f) uniform image2DArray motionVectorImage;
+layout(set = 3, binding = 5, r16f) uniform image2DArray linearDepthImage;
+layout(set = 3, binding = 6, r16f) uniform image2DArray specularHitDepthImage;
+layout(set = 3, binding = 7, r16f) uniform image2DArray firstHitDepthImage;
+layout(set = 3, binding = 8, rgba16f) uniform image2DArray firstHitDiffuseDirectLightImage;
+layout(set = 3, binding = 9, rgba16f) uniform image2DArray firstHitDiffuseIndirectLightImage;
+layout(set = 3, binding = 10, rgba16f) uniform image2DArray firstHitSpecularImage;
+layout(set = 3, binding = 11, rgba16f) uniform image2DArray firstHitClearImage;
+layout(set = 3, binding = 12, rgba16f) uniform image2DArray firstHitBaseEmissionImage;
+layout(set = 3, binding = 13, r16f) uniform image2DArray directLightDepthImage;
+layout(set = 3, binding = 14, r32ui) uniform readonly uimage2DArray visibilityMaskImage;
 
 layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer VertexBuffer {
     PBRTriangle vertices[];
@@ -89,6 +90,7 @@ indexBuffer;
 
 layout(push_constant) uniform PushConstant {
     int numRayBounces;
+    int useJitter;
 }
 pc;
 
@@ -113,26 +115,80 @@ vec3 applyFog(vec3 radiance, float t, float fogStart, float dBase, float dFog, v
 }
 
 void main() {
+    // Per-eye view/projection with VR eye offset
+    // Use gl_LaunchIDEXT.z to get eye index in 3D dispatch mode
+    uint currentEyeIndex = gl_LaunchIDEXT.z;
+
     ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
     vec2 pixelCenter = pixel + 0.5;
     vec2 unjitteredPixelCenter = pixelCenter;
     pixelCenter += worldUBO.cameraJitter;
 
     vec2 resolution = vec2(gl_LaunchSizeEXT.xy);
-    float fovY = fovYFromProj(worldUBO.cameraProjMat);
-    float fovX = fovXFromProj(worldUBO.cameraProjMat);
+
+    // Visibility mask: skip hidden pixels outside the lens FOV.
+    // Bitmask texture has width=ceil(W/32); each uint32 covers 32 horizontal pixels.
+    uint visMask = imageLoad(visibilityMaskImage, ivec3(pixel.x >> 5, pixel.y, currentEyeIndex)).r;
+    if ((visMask & (1u << (uint(pixel.x) & 31u))) == 0u) {
+        imageStore(outputImage, ivec3(pixel, currentEyeIndex), vec4(0.0));
+        imageStore(diffuseAlbedoImage, ivec3(pixel, currentEyeIndex), vec4(0.0));
+        imageStore(specularAlbedoImage, ivec3(pixel, currentEyeIndex), vec4(0.0));
+        imageStore(normalRoughnessImage, ivec3(pixel, currentEyeIndex), vec4(0.0));
+        imageStore(motionVectorImage, ivec3(pixel, currentEyeIndex), vec4(0.0));
+        imageStore(linearDepthImage, ivec3(pixel, currentEyeIndex), vec4(0.0));
+        imageStore(specularHitDepthImage, ivec3(pixel, currentEyeIndex), vec4(0.0));
+        imageStore(firstHitDepthImage, ivec3(pixel, currentEyeIndex), vec4(0.0));
+        imageStore(firstHitDiffuseDirectLightImage, ivec3(pixel, currentEyeIndex), vec4(0.0));
+        imageStore(firstHitDiffuseIndirectLightImage, ivec3(pixel, currentEyeIndex), vec4(0.0));
+        imageStore(firstHitSpecularImage, ivec3(pixel, currentEyeIndex), vec4(0.0));
+        imageStore(firstHitClearImage, ivec3(pixel, currentEyeIndex), vec4(0.0));
+        imageStore(firstHitBaseEmissionImage, ivec3(pixel, currentEyeIndex), vec4(0.0));
+        imageStore(directLightDepthImage, ivec3(pixel, currentEyeIndex), vec4(0.0));
+        return;
+    }
+
+    // Foveated rendering: determine block size for this pixel
+    uint blockSize = 1u;
+    if (worldUBO.foveatedOuterBlockSize > 1u) {
+        vec2 center = resolution * worldUBO.foveatedCenter;
+        float halfDiag = length(center);
+        uint bs = worldUBO.foveatedOuterBlockSize;
+        // Use block origin distance so all pixels in a block make the same decision
+        ivec2 blockOrigin = (pixel / ivec2(bs)) * ivec2(bs);
+        float originDist = length(vec2(blockOrigin) + 0.5 - center) / halfDiag;
+        if (originDist > worldUBO.foveatedInnerRadius) {
+            blockSize = bs;
+            if (pixel != blockOrigin) {
+                return; // non-origin pixel, origin will fill this
+            }
+        }
+    }
+
+    // Per-eye view/projection with VR eye offset
+    mat4 eyeViewOffset = worldUBO.eyeViewOffsets[currentEyeIndex];
+    mat4 eyeView = eyeViewOffset * worldUBO.cameraEffectedViewMat;
+    // Inverse of pure translation: negate the translation column
+    mat4 eyeViewOffsetInv = mat4(1.0);
+    eyeViewOffsetInv[3] = vec4(-eyeViewOffset[3].xyz, 1.0);
+    mat4 eyeViewInv = worldUBO.cameraEffectedViewMatInv * eyeViewOffsetInv;
+
+    mat4 projMat = worldUBO.eyeProjOffsets[currentEyeIndex] * worldUBO.cameraProjMat;
+    mat4 projMatInv = inverse(projMat);
+
+    float fovY = fovYFromProj(projMat);
+    float fovX = fovXFromProj(projMat);
 
     vec2 ndc = pixelCenter / resolution * 2.0 - 1.0;
 
     vec4 nearPoint = vec4(ndc, 0.0, 1.0);
 
-    vec4 viewNear = worldUBO.cameraProjMatInv * nearPoint;
+    vec4 viewNear = projMatInv * nearPoint;
     viewNear /= viewNear.w; 
 
-    vec3 origin = vec3(worldUBO.cameraEffectedViewMatInv *
-                       vec4(0, 0, 0, 1)); // even though camera-centered, view mat contains still small shifts
+    vec3 origin = vec3(eyeViewInv *
+                       vec4(0, 0, 0, 1)); // per-eye camera origin with VR offset
     const vec3 eyePos = origin;
-    vec3 direction = normalize(vec3(worldUBO.cameraEffectedViewMatInv * vec4(viewNear.xyz, 0.0)));
+    vec3 direction = normalize(vec3(eyeViewInv * vec4(viewNear.xyz, 0.0)));
     const vec3 orgDirection = direction;
 
     const uint rayFlags = gl_RayFlagsCullBackFacingTrianglesEXT;
@@ -152,6 +208,10 @@ void main() {
     vec3 firstHitDirectRadiance = vec3(0.0);
     vec3 firstHitIndirectRadiance = vec3(0.0);
     vec3 firstHitBaseEmission = vec3(0.0);
+
+    // Saved for foveated block-fill: per-pixel motion vector recomputation
+    vec4 savedMotionOrigin = vec4(0.0);
+    mat4 savedPrevRelativeMVP = mat4(1.0);
 
     mainRay.seed = worldUBO.seed;
     for (int isHand = 0; isHand <= 1; isHand++) {
@@ -247,16 +307,16 @@ void main() {
             float firstHitLinearDepth = INF_DISTANCE;
             if (psrDepth == 0 && mainRay.hitT != INF_DISTANCE) {
                 vec3 hitPos = eyePos + orgDirection * T;
-                hitPos -= worldUBO.cameraViewMatInv[3].xyz;
-                firstHitLinearDepth = -(mat3(worldUBO.cameraEffectedViewMat) * hitPos).z;
+                hitPos -= eyeViewInv[3].xyz;
+                firstHitLinearDepth = -(mat3(eyeView) * hitPos).z;
             }
             if (isHand == 0) {
                 if (psrDepth == 0) {
-                    imageStore(firstHitDepthImage, pixel, vec4(firstHitLinearDepth));
+                    imageStore(firstHitDepthImage, ivec3(pixel, currentEyeIndex), vec4(firstHitLinearDepth));
                 }
             } else {
                 if (psrDepth == 0 && mainRay.hitT != INF_DISTANCE) {
-                    imageStore(firstHitDepthImage, pixel, vec4(firstHitLinearDepth));
+                    imageStore(firstHitDepthImage, ivec3(pixel, currentEyeIndex), vec4(firstHitLinearDepth));
                 }
             }
 
@@ -281,17 +341,19 @@ void main() {
             psrMirror *= buildMirrorMatrix4(mainRay.normal, mainRay.worldPos);
         } while (psrDepth < NUM_PSR_PER_RAY);
 
-        imageStore(directLightDepthImage, pixel, vec4(mainRay.directLightHitT));
+        imageStore(directLightDepthImage, ivec3(pixel, currentEyeIndex), vec4(mainRay.directLightHitT));
 
         vec3 virtualOrigin = eyePos + orgDirection * T;
-        // viewZ is the 'Z' of the world hit position in camera space
-        float viewDepth = -(worldUBO.cameraEffectedViewMat * vec4(virtualOrigin, 1.0)).z;
+        // viewZ is the 'Z' of the world hit position in camera space (per-eye)
+        float viewDepth = -(eyeView * vec4(virtualOrigin, 1.0)).z;
 
         // get camera pos and delta
         dvec3 currCameraPos = worldUBO.cameraPos.xyz;
         dvec3 lastCameraPos = lastWorldUBO.cameraPos.xyz;
         vec3 cameraDelta = vec3(currCameraPos - lastCameraPos);
-        mat4 prevRelativeMVP = lastWorldUBO.cameraProjMat * lastWorldUBO.cameraEffectedViewMat;
+        mat4 lastEyeView = lastWorldUBO.eyeViewOffsets[currentEyeIndex] * lastWorldUBO.cameraEffectedViewMat;
+        mat4 lastProjMat = lastWorldUBO.eyeProjOffsets[currentEyeIndex] * lastWorldUBO.cameraProjMat;
+        mat4 prevRelativeMVP = lastProjMat * lastEyeView;
 
         // Early out when hitting sky (even via mirrors)
         if (hitSky) {
@@ -299,30 +361,32 @@ void main() {
             // 1. not for hand, can be directly or reflected towards sky
             // 2. for hand, must be reflected towards sky
             if (isHand == 0 || (isHand == 1 && psrDepth > 1)) {
-                imageStore(outputImage, pixel, vec4(mainRay.radiance, 1.0));
-                imageStore(diffuseAlbedoImage, pixel, vec4(reinhardMax(mainRay.radiance), 0));
-                imageStore(specularAlbedoImage, pixel, vec4(0));
-                imageStore(normalRoughnessImage, pixel, vec4(0));
+                imageStore(outputImage, ivec3(pixel, currentEyeIndex), vec4(mainRay.radiance, 1.0));
+                imageStore(diffuseAlbedoImage, ivec3(pixel, currentEyeIndex), vec4(reinhardMax(mainRay.radiance), 0));
+                imageStore(specularAlbedoImage, ivec3(pixel, currentEyeIndex), vec4(0));
+                imageStore(normalRoughnessImage, ivec3(pixel, currentEyeIndex), vec4(0));
                 // imageStore(dlssSpecHitDistance, pixel, vec4(0.0));
 
                 vec4 motionOrigin;
                 if (!isPsr) {
                     // This is the case when we hit the skybox directly.
                     // Treat it like a point at infinity along the view vector
-                    imageStore(linearDepthImage, pixel, vec4(INF_DISTANCE));
+                    imageStore(linearDepthImage, ivec3(pixel, currentEyeIndex), vec4(INF_DISTANCE));
                     // motion origin is point at infinity along view vector
                     motionOrigin = vec4(orgDirection, 0.0);
                 } else {
                     // Here we hit the sky through a reflection on the primary surface
                     // Pretend the sky is "texture mapped" onto the mirror and moves with it.
-                    imageStore(linearDepthImage, pixel, vec4(viewDepth));
+                    imageStore(linearDepthImage, ivec3(pixel, currentEyeIndex), vec4(viewDepth));
                     vec3 virtualRelativeOrigin = origin + orgDirection * T;
                     vec3 originRelativeToPrevCam = virtualRelativeOrigin + cameraDelta;
                     motionOrigin = vec4(originRelativeToPrevCam, 1.0);
                 }
 
                 vec2 motionVec = computeCameraMotionVector(prevRelativeMVP, pixelCenter, motionOrigin);
-                imageStore(motionVectorImage, pixel, vec4(motionVec, vec2(0.0)));
+                imageStore(motionVectorImage, ivec3(pixel, currentEyeIndex), vec4(motionVec, vec2(0.0)));
+                savedMotionOrigin = motionOrigin;
+                savedPrevRelativeMVP = prevRelativeMVP;
 
                 mainRay.intermediateRadiance = mainRay.radiance;
                 psrHitSky = true;
@@ -340,10 +404,10 @@ void main() {
         firstHitMat = mat;
 
         // BaseColor/Metalness Buffer. DLSS only needs the base color ("Diffuse Albedo")
-        imageStore(diffuseAlbedoImage, pixel,
+        imageStore(diffuseAlbedoImage, ivec3(pixel, currentEyeIndex),
                    vec4(mainRay.albedoValue.rgb * mainRay.albedoValue.a, firstHitMat.metallic));
 
-        imageStore(specularAlbedoImage, pixel, vec4(firstHitMat.f0, 0.0));
+        imageStore(specularAlbedoImage, ivec3(pixel, currentEyeIndex), vec4(firstHitMat.f0, 0.0));
 
         // Normal/Roughness buffer
         {
@@ -352,11 +416,11 @@ void main() {
             vec3 worldNormal = (psrMirror * vec4(mainRay.normal, 0.0)).xyz;
 
             vec4 normalRoughness = vec4(worldNormal, firstHitMat.roughness);
-            imageStore(normalRoughnessImage, pixel, normalRoughness);
+            imageStore(normalRoughnessImage, ivec3(pixel, currentEyeIndex), normalRoughness);
         }
 
         // ViewZ buffer
-        imageStore(linearDepthImage, pixel, vec4(viewDepth));
+        imageStore(linearDepthImage, ivec3(pixel, currentEyeIndex), vec4(viewDepth));
 
         // Motion Vector Buffer
         {
@@ -407,7 +471,9 @@ void main() {
             }
             vec2 motionVec =
                 computeCameraMotionVector(prevRelativeMVP, pixelCenter, vec4(originRelativeToPrevCam, 1.0));
-            imageStore(motionVectorImage, pixel, vec4(motionVec, 0.0, 0.0));
+            imageStore(motionVectorImage, ivec3(pixel, currentEyeIndex), vec4(motionVec, 0.0, 0.0));
+            savedMotionOrigin = vec4(originRelativeToPrevCam, 1.0);
+            savedPrevRelativeMVP = prevRelativeMVP;
         }
 
         // sightly make the first non-mirror hit brighter
@@ -528,24 +594,69 @@ void main() {
 
     if (!psrHitSky && isFirstHitNoisy) {
         if (isFirstHitDiffuse) {
-            imageStore(firstHitDiffuseDirectLightImage, ivec2(pixel), vec4(firstHitDirectRadiance, 1.0));
-            imageStore(firstHitDiffuseIndirectLightImage, ivec2(pixel), vec4(firstHitIndirectRadiance, 1.0));
-            imageStore(firstHitSpecularImage, ivec2(pixel), vec4(vec3(0.0), 1.0));
-            imageStore(firstHitClearImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+            imageStore(firstHitDiffuseDirectLightImage, ivec3(pixel, currentEyeIndex), vec4(firstHitDirectRadiance, 1.0));
+            imageStore(firstHitDiffuseIndirectLightImage, ivec3(pixel, currentEyeIndex), vec4(firstHitIndirectRadiance, 1.0));
+            imageStore(firstHitSpecularImage, ivec3(pixel, currentEyeIndex), vec4(vec3(0.0), 1.0));
+            imageStore(firstHitClearImage, ivec3(pixel, currentEyeIndex), vec4(vec3(0.0), 0.0));
         } else {
-            imageStore(firstHitDiffuseDirectLightImage, ivec2(pixel), vec4(vec3(0.0), 1.0));
-            imageStore(firstHitDiffuseIndirectLightImage, ivec2(pixel), vec4(vec3(0.0), 1.0));
-            imageStore(firstHitSpecularImage, ivec2(pixel), vec4(mainRay.radiance, 1.0));
-            imageStore(firstHitClearImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+            imageStore(firstHitDiffuseDirectLightImage, ivec3(pixel, currentEyeIndex), vec4(vec3(0.0), 1.0));
+            imageStore(firstHitDiffuseIndirectLightImage, ivec3(pixel, currentEyeIndex), vec4(vec3(0.0), 1.0));
+            imageStore(firstHitSpecularImage, ivec3(pixel, currentEyeIndex), vec4(mainRay.radiance, 1.0));
+            imageStore(firstHitClearImage, ivec3(pixel, currentEyeIndex), vec4(vec3(0.0), 0.0));
         }
     } else {
-        imageStore(firstHitDiffuseDirectLightImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
-        imageStore(firstHitDiffuseIndirectLightImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
-        imageStore(firstHitSpecularImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
-        imageStore(firstHitClearImage, ivec2(pixel), vec4(mainRay.radiance, 1.0));
+        imageStore(firstHitDiffuseDirectLightImage, ivec3(pixel, currentEyeIndex), vec4(vec3(0.0), 0.0));
+        imageStore(firstHitDiffuseIndirectLightImage, ivec3(pixel, currentEyeIndex), vec4(vec3(0.0), 0.0));
+        imageStore(firstHitSpecularImage, ivec3(pixel, currentEyeIndex), vec4(vec3(0.0), 0.0));
+        imageStore(firstHitClearImage, ivec3(pixel, currentEyeIndex), vec4(mainRay.radiance, 1.0));
     }
-    imageStore(firstHitBaseEmissionImage, ivec2(pixel), vec4(firstHitEmission, 1.0));
+    imageStore(firstHitBaseEmissionImage, ivec3(pixel, currentEyeIndex), vec4(firstHitEmission, 1.0));
     float specHitDepth = hasSecondHit ? distFirstToSecond : (isFirstHitNoisy && !isFirstHitDiffuse ? 1000.0 : 0.0);
-    imageStore(specularHitDepthImage, ivec2(pixel), vec4(specHitDepth, vec3(1.0)));
-    imageStore(outputImage, ivec2(pixel), vec4(mainRay.radiance, 1.0));
+    imageStore(specularHitDepthImage, ivec3(pixel, currentEyeIndex), vec4(specHitDepth, vec3(1.0)));
+    imageStore(outputImage, ivec3(pixel, currentEyeIndex), vec4(mainRay.radiance, 1.0));
+
+    // Foveated block-fill: copy origin pixel data to all other pixels in the block
+    if (blockSize > 1u) {
+        vec4 v_output           = imageLoad(outputImage, ivec3(pixel, currentEyeIndex));
+        vec4 v_diffuseAlbedo    = imageLoad(diffuseAlbedoImage, ivec3(pixel, currentEyeIndex));
+        vec4 v_specularAlbedo   = imageLoad(specularAlbedoImage, ivec3(pixel, currentEyeIndex));
+        vec4 v_normalRoughness  = imageLoad(normalRoughnessImage, ivec3(pixel, currentEyeIndex));
+        vec4 v_linearDepth      = imageLoad(linearDepthImage, ivec3(pixel, currentEyeIndex));
+        vec4 v_specHitDepth     = imageLoad(specularHitDepthImage, ivec3(pixel, currentEyeIndex));
+        vec4 v_firstHitDepth    = imageLoad(firstHitDepthImage, ivec3(pixel, currentEyeIndex));
+        vec4 v_diffDirect       = imageLoad(firstHitDiffuseDirectLightImage, ivec3(pixel, currentEyeIndex));
+        vec4 v_diffIndirect     = imageLoad(firstHitDiffuseIndirectLightImage, ivec3(pixel, currentEyeIndex));
+        vec4 v_specular         = imageLoad(firstHitSpecularImage, ivec3(pixel, currentEyeIndex));
+        vec4 v_clear            = imageLoad(firstHitClearImage, ivec3(pixel, currentEyeIndex));
+        vec4 v_baseEmission     = imageLoad(firstHitBaseEmissionImage, ivec3(pixel, currentEyeIndex));
+        vec4 v_directLightDepth = imageLoad(directLightDepthImage, ivec3(pixel, currentEyeIndex));
+
+        for (uint dy = 0u; dy < blockSize; dy++) {
+            for (uint dx = 0u; dx < blockSize; dx++) {
+                ivec2 fillPixel = pixel + ivec2(dx, dy);
+                if (fillPixel == pixel) continue;
+                if (fillPixel.x >= int(resolution.x) || fillPixel.y >= int(resolution.y)) continue;
+
+                // Compute corrected motion vector for this fill pixel
+                vec2 fillPixelCenter = vec2(fillPixel) + 0.5 + worldUBO.cameraJitter;
+                vec2 fillMotionVec = computeCameraMotionVector(
+                    savedPrevRelativeMVP, fillPixelCenter, savedMotionOrigin);
+
+                imageStore(outputImage, ivec3(fillPixel, currentEyeIndex), v_output);
+                imageStore(diffuseAlbedoImage, ivec3(fillPixel, currentEyeIndex), v_diffuseAlbedo);
+                imageStore(specularAlbedoImage, ivec3(fillPixel, currentEyeIndex), v_specularAlbedo);
+                imageStore(normalRoughnessImage, ivec3(fillPixel, currentEyeIndex), v_normalRoughness);
+                imageStore(motionVectorImage, ivec3(fillPixel, currentEyeIndex), vec4(fillMotionVec, 0.0, 0.0));
+                imageStore(linearDepthImage, ivec3(fillPixel, currentEyeIndex), v_linearDepth);
+                imageStore(specularHitDepthImage, ivec3(fillPixel, currentEyeIndex), v_specHitDepth);
+                imageStore(firstHitDepthImage, ivec3(fillPixel, currentEyeIndex), v_firstHitDepth);
+                imageStore(firstHitDiffuseDirectLightImage, ivec3(fillPixel, currentEyeIndex), v_diffDirect);
+                imageStore(firstHitDiffuseIndirectLightImage, ivec3(fillPixel, currentEyeIndex), v_diffIndirect);
+                imageStore(firstHitSpecularImage, ivec3(fillPixel, currentEyeIndex), v_specular);
+                imageStore(firstHitClearImage, ivec3(fillPixel, currentEyeIndex), v_clear);
+                imageStore(firstHitBaseEmissionImage, ivec3(fillPixel, currentEyeIndex), v_baseEmission);
+                imageStore(directLightDepthImage, ivec3(fillPixel, currentEyeIndex), v_directLightDepth);
+            }
+        }
+    }
 }

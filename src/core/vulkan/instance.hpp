@@ -2,9 +2,15 @@
 
 #include "core/all_extern.hpp"
 
+#include <string>
+#include <vector>
+
 namespace vk {
 class Instance : public SharedObject<Instance> {
   public:
+    // Extra instance extensions to enable (set before create(), e.g. by OpenXR).
+    static std::vector<std::string> extraExtensions;
+
     Instance();
     ~Instance();
 

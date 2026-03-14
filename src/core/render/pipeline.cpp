@@ -13,6 +13,7 @@
 #include "core/render/modules/world/temporal_accumulation/temporal_accumulation_module.hpp"
 #include "core/render/modules/world/tone_mapping/tone_mapping_module.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <iomanip>
 #include <set>
@@ -21,6 +22,8 @@ WorldPipelineBlueprint::WorldPipelineBlueprint(WorldPipelineBuildParams *params)
     std::set<uint32_t> imageIndices;
     auto framework = Renderer::instance().framework();
     auto pipeline = framework->pipeline();
+
+    eyeCount_ = static_cast<uint32_t>(params->eyeCount > 0 ? params->eyeCount : 1);
 
     for (int i = 0; i < params->moduleCount; i++) {
         std::string moduleName = params->moduleNames[i];
@@ -73,13 +76,65 @@ void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<P
     auto blueprint = pipeline->worldPipelineBlueprint();
     uint32_t frameNum = framework->swapchain()->imageCount();
 
+    bool useStereo = false;
+#ifdef MCVR_ENABLE_OPENXR
+    if (auto *xr = framework->xrContext(); xr != nullptr) {
+        useStereo = Renderer::options.vrEnabled && xr->isSessionRunning();
+    }
+#endif
+    eyeCount_ = useStereo ? 2u : 1u;
+
+    VkExtent2D mirrorExtent = framework->swapchain()->vkExtent();
+    uint32_t targetWidth = mirrorExtent.width;
+    uint32_t targetHeight = mirrorExtent.height;
+
+    // Sync VRSystem state from static options
+    {
+        auto &vr = Renderer::instance().vrSystem();
+        auto &opts = Renderer::options;
+        vr.enabled = useStereo;
+        vr.config.renderScale = opts.vrRenderScale;
+        vr.config.ipd = opts.vrIPD;
+        vr.config.worldScale = opts.vrWorldScale;
+        vr.eyeCount = eyeCount_;
+
+        if (vr.enabled && eyeCount_ > 1) {
+            bool xrResolutionReady = false;
+#ifdef MCVR_ENABLE_OPENXR
+            if (auto *xr = framework->xrContext(); xr != nullptr) {
+                const uint32_t xrW = xr->swapchainWidth();
+                const uint32_t xrH = xr->swapchainHeight();
+                if (xrW > 0 && xrH > 0) {
+                    for (uint32_t eye = 0; eye < 2; eye++) {
+                        vr.eyes[eye].recommendedWidth = xrW;
+                        vr.eyes[eye].recommendedHeight = xrH;
+                    }
+                    xrResolutionReady = true;
+                }
+            }
+#endif
+            if (!xrResolutionReady) {
+                // No XR runtime/session yet: keep legacy simulation fallback for startup safety.
+                vr.updateSimulation(mirrorExtent.width, mirrorExtent.height, glm::radians(70.0f));
+            }
+
+            const uint32_t baseWidth = std::max(vr.eyes[0].recommendedWidth, vr.eyes[1].recommendedWidth);
+            const uint32_t baseHeight = std::max(vr.eyes[0].recommendedHeight, vr.eyes[1].recommendedHeight);
+            const float scale = std::max(0.1f, vr.config.renderScale);
+            targetWidth = std::max(1u, static_cast<uint32_t>(static_cast<float>(baseWidth) * scale));
+            targetHeight = std::max(1u, static_cast<uint32_t>(static_cast<float>(baseHeight) * scale));
+        } else if (vr.enabled) {
+            vr.updateSimulation(mirrorExtent.width, mirrorExtent.height, glm::radians(70.0f));
+        }
+    }
+
     worldModules_.resize(blueprint->moduleNames_.size());
     sharedImages_.resize(frameNum,
                          std::vector<std::shared_ptr<vk::DeviceLocalImage>>(blueprint->imageFormats_.size(), nullptr));
     contexts_.resize(frameNum);
 
     // Determine initial render resolution from upscaler quality (if present)
-    VkExtent2D extent = framework->swapchain()->vkExtent();
+    VkExtent2D extent{targetWidth, targetHeight};
     uint32_t renderWidth = extent.width;
     uint32_t renderHeight = extent.height;
     size_t upscalerIndex = std::numeric_limits<size_t>::max();
@@ -104,12 +159,13 @@ void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<P
     for (int frameIndex = 0; frameIndex < frameNum; frameIndex++) {
         // Keep the primary output at display resolution
         sharedImages_[frameIndex][0] = vk::DeviceLocalImage::create(
-            framework->device(), framework->vma(), false, extent.width, extent.height, 1, blueprint->imageFormats_[0],
+            framework->device(), framework->vma(), false, extent.width, extent.height, eyeCount_, blueprint->imageFormats_[0],
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
 #ifdef USE_AMD
                 | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
 #endif
         );
+        if (eyeCount_ > 1) sharedImages_[frameIndex][0]->createPerLayerViews();
     }
 
     // Pre-create outputs for modules before upscaler at render resolution
@@ -124,19 +180,21 @@ void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<P
             for (uint32_t idx : renderIndices) {
                 if (sharedImages_[frameIndex][idx] != nullptr) continue;
                 sharedImages_[frameIndex][idx] = vk::DeviceLocalImage::create(
-                    framework->device(), framework->vma(), false, renderWidth, renderHeight, 1,
+                    framework->device(), framework->vma(), false, renderWidth, renderHeight, eyeCount_,
                     blueprint->imageFormats_[idx],
                     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
 #ifdef USE_AMD
                         | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
 #endif
                 );
+                if (eyeCount_ > 1) sharedImages_[frameIndex][idx]->createPerLayerViews();
             }
         }
     }
 
     for (int i = blueprint->moduleNames_.size() - 1; i >= 0; i--) {
         worldModules_[i] = Pipeline::worldModuleConstructors[blueprint->moduleNames_[i]](framework, shared_from_this());
+        worldModules_[i]->setEyeCount(eyeCount_);
 
         auto &moduleInputIndices = blueprint->modulesInputIndices_[i];
         auto &moduleOutputIndices = blueprint->modulesOutputIndices_[i];
@@ -202,6 +260,7 @@ WorldPipelineContext::WorldPipelineContext(std::shared_ptr<FrameworkContext> fra
                                            std::shared_ptr<WorldPipeline> worldPipeline)
     : frameworkContext(frameworkContext),
       worldPipeline(worldPipeline),
+      eyeCount_(worldPipeline->eyeCount()),
       outputImage(worldPipeline->sharedImages_[frameworkContext->frameIndex][0]) {
     auto &worldModules = worldPipeline->worldModules();
     for (int i = 0; i < worldModules.size(); i++) {
@@ -250,7 +309,24 @@ void WorldPipelineContext::render() {
         outputImage->imageLayout() = targetLayout;
     }
 
-    for (int i = 0; i < worldModuleContexts.size(); i++) { worldModuleContexts[i]->render(); }
+    for (int i = 0; i < worldModuleContexts.size(); i++) {
+        if (eyeCount_ > 1) {
+            auto mode = worldModuleContexts[i]->stereoMode();
+            switch (mode) {
+                case StereoMode::SingleInstance3DDispatch:
+                    worldModuleContexts[i]->render3D(eyeCount_);
+                    break;
+                case StereoMode::SingleInstanceMultiDispatch:
+                case StereoMode::DualInstance:
+                    for (uint32_t eye = 0; eye < eyeCount_; eye++) {
+                        worldModuleContexts[i]->renderEye(eye);
+                    }
+                    break;
+            }
+        } else {
+            worldModuleContexts[i]->render();
+        }
+    }
 
     worldCommandBuffer->barriersBufferImage(
         {}, {{
@@ -497,26 +573,40 @@ void PipelineContext::fuseWorld() {
 
     uiModuleContext->overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 
-    // TODO: add to command buffer
-    VkImageBlit imageBlit{};
-    imageBlit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    imageBlit.srcSubresource.mipLevel = 0;
-    imageBlit.srcSubresource.baseArrayLayer = 0;
-    imageBlit.srcSubresource.layerCount = 1;
-    imageBlit.srcOffsets[0] = {0, 0, 0};
-    imageBlit.srcOffsets[1] = {static_cast<int>(worldPipelineContext->outputImage->width()),
-                               static_cast<int>(worldPipelineContext->outputImage->height()), 1};
-    imageBlit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    imageBlit.dstSubresource.mipLevel = 0;
-    imageBlit.dstSubresource.baseArrayLayer = 0;
-    imageBlit.dstSubresource.layerCount = 1;
-    imageBlit.dstOffsets[0] = {0, 0, 0};
-    imageBlit.dstOffsets[1] = {static_cast<int>(uiModuleContext->overlayDrawColorImage->width()),
-                               static_cast<int>(uiModuleContext->overlayDrawColorImage->height()), 1};
+    auto srcImage = worldPipelineContext->outputImage;
+    auto dstImage = uiModuleContext->overlayDrawColorImage;
+    int srcW = static_cast<int>(srcImage->width());
+    int srcH = static_cast<int>(srcImage->height());
+    int dstW = static_cast<int>(dstImage->width());
+    int dstH = static_cast<int>(dstImage->height());
 
-    vkCmdBlitImage(overlayCommandBuffer->vkCommandBuffer(), worldPipelineContext->outputImage->vkImage(),
-                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, uiModuleContext->overlayDrawColorImage->vkImage(),
-                   uiModuleContext->overlayDrawColorImage->imageLayout(), 1, &imageBlit, VK_FILTER_LINEAR);
+    if (worldPipelineContext->eyeCount_ > 1) {
+        // SBS: layer 0 → left half, layer 1 → right half
+        int halfW = dstW / 2;
+        VkImageBlit blits[2]{};
+        for (uint32_t eye = 0; eye < 2; eye++) {
+            blits[eye].srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, eye, 1};
+            blits[eye].srcOffsets[0] = {0, 0, 0};
+            blits[eye].srcOffsets[1] = {srcW, srcH, 1};
+            blits[eye].dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            blits[eye].dstOffsets[0] = {static_cast<int>(eye * halfW), 0, 0};
+            blits[eye].dstOffsets[1] = {static_cast<int>((eye + 1) * halfW), dstH, 1};
+        }
+        vkCmdBlitImage(overlayCommandBuffer->vkCommandBuffer(), srcImage->vkImage(),
+                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dstImage->vkImage(),
+                       dstImage->imageLayout(), 2, blits, VK_FILTER_LINEAR);
+    } else {
+        VkImageBlit imageBlit{};
+        imageBlit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        imageBlit.srcOffsets[0] = {0, 0, 0};
+        imageBlit.srcOffsets[1] = {srcW, srcH, 1};
+        imageBlit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        imageBlit.dstOffsets[0] = {0, 0, 0};
+        imageBlit.dstOffsets[1] = {dstW, dstH, 1};
+        vkCmdBlitImage(overlayCommandBuffer->vkCommandBuffer(), srcImage->vkImage(),
+                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dstImage->vkImage(),
+                       dstImage->imageLayout(), 1, &imageBlit, VK_FILTER_LINEAR);
+    }
 
     overlayCommandBuffer->barriersBufferImage(
         {}, {

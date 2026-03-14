@@ -37,9 +37,10 @@ bool NrdModule::setOrCreateInputImages(std::vector<std::shared_ptr<vk::DeviceLoc
     if (images.size() != inputImageNum) return false;
 
     auto createImage = [&](uint32_t index) {
-        images[index] = vk::DeviceLocalImage::create(m_device, m_vma, false, width_, height_, 1, formats[index],
+        images[index] = vk::DeviceLocalImage::create(m_device, m_vma, false, width_, height_, eyeCount_, formats[index],
                                                      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                                                          VK_IMAGE_USAGE_SAMPLED_BIT);
+        if (eyeCount_ > 1) images[index]->createPerLayerViews();
     };
 
     for (uint32_t i = 0; i < images.size(); i++) {
@@ -101,10 +102,25 @@ void NrdModule::build() {
     auto worldPipeline = worldPipeline_.lock();
     uint32_t size = framework->swapchain()->imageCount();
 
-    m_wrapper = std::make_shared<NrdWrapper>();
+    // Create one NrdWrapper per eye
+    m_wrappers.resize(eyeCount_);
+    for (uint32_t eye = 0; eye < eyeCount_; eye++) {
+        m_wrappers[eye] = std::make_shared<NrdWrapper>();
+        bool ok = m_wrappers[eye]->init(m_device, m_vma, framework->physicalDevice(), width_, height_, size);
+        if (!ok) {
+            std::cerr << "[NrdModule] init failed for eye " << eye << std::endl;
+            m_wrappers[eye].reset();
+        }
+    }
+
+    uint32_t totalCtx = size * eyeCount_;
+
+    // Per-eye denoised images: indexed by [frameIndex * eyeCount_ + eyeIndex]
+    denoisedDiffuseRadianceImages_.resize(totalCtx);
+    denoisedSpecularRadianceImages_.resize(totalCtx);
 
     auto createInternal = [&](std::vector<std::shared_ptr<vk::DeviceLocalImage>> &images) {
-        for (uint32_t i = 0; i < size; i++) {
+        for (uint32_t i = 0; i < totalCtx; i++) {
             if (images[i] != nullptr) continue;
             images[i] =
                 vk::DeviceLocalImage::create(m_device, m_vma, false, width_, height_, 1, VK_FORMAT_R16G16B16A16_SFLOAT,
@@ -114,14 +130,19 @@ void NrdModule::build() {
     createInternal(denoisedDiffuseRadianceImages_);
     createInternal(denoisedSpecularRadianceImages_);
 
-    bool ok = m_wrapper->init(m_device, m_vma, framework->physicalDevice(), width_, height_, size);
-    if (!ok) {
-        std::cerr << "[NrdModule] init failed." << std::endl;
-        m_wrapper.reset();
+    // Per-eye single-layer copy of linearDepth for NRD IN_VIEWZ (because NRD can't use array image views)
+    if (eyeCount_ > 1 && linearDepthImages_[0]) {
+        VkFormat depthFmt = linearDepthImages_[0]->vkFormat();
+        m_nrdLinearDepthImages.resize(totalCtx);
+        for (uint32_t i = 0; i < totalCtx; i++) {
+            m_nrdLinearDepthImages[i] = vk::DeviceLocalImage::create(
+                m_device, m_vma, false, width_, height_, 1, depthFmt,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        }
     }
 
-    createCompositionPipeline(m_device, size);
-    createPreparePipeline(m_device, size);
+    createCompositionPipeline(m_device, totalCtx);
+    createPreparePipeline(m_device, totalCtx);
 
     contexts_.resize(size);
     for (int i = 0; i < size; i++) {
@@ -166,7 +187,8 @@ void NrdModule::bindTexture(std::shared_ptr<vk::Sampler> sampler,
                             int index) {}
 
 void NrdModule::preClose() {
-    m_wrapper.reset();
+    m_wrappers.clear();
+    m_nrdLinearDepthImages.clear();
     composeDescriptorTables_.clear();
     prepareDescriptorTables_.clear();
     composeSamplers_ = {};
@@ -192,12 +214,16 @@ NrdModuleContext::NrdModuleContext(std::shared_ptr<FrameworkContext> frameworkCo
       diffuseHitDepthImage(nrdModule->diffuseHitDepthImages_[frameworkContext->frameIndex]),
       specularHitDepthImage(nrdModule->specularHitDepthImages_[frameworkContext->frameIndex]),
       denoisedRadianceImage(nrdModule->denoisedRadianceImages_[frameworkContext->frameIndex]),
-      denoisedDiffuseRadianceImage(nrdModule->denoisedDiffuseRadianceImages_[frameworkContext->frameIndex]),
-      denoisedSpecularRadianceImage(nrdModule->denoisedSpecularRadianceImages_[frameworkContext->frameIndex]) {}
+      denoisedDiffuseRadianceImage(nrdModule->denoisedDiffuseRadianceImages_[frameworkContext->frameIndex * nrdModule->eyeCount()]),
+      denoisedSpecularRadianceImage(nrdModule->denoisedSpecularRadianceImages_[frameworkContext->frameIndex * nrdModule->eyeCount()]) {}
 
 void NrdModuleContext::render() {
+    renderEye(0);
+}
+
+void NrdModuleContext::renderEye(uint32_t eyeIndex) {
     auto module = nrdModule.lock();
-    if (!module || !module->wrapper()) return;
+    if (!module || !module->wrapper(eyeIndex)) return;
 
     auto context = frameworkContext.lock();
     auto worldCommandBuffer = context->worldCommandBuffer;
@@ -209,13 +235,21 @@ void NrdModuleContext::render() {
 
     if (module->width_ == 0 || module->height_ == 0) return;
 
+    uint32_t dtIdx = context->frameIndex * module->eyeCount_ + eyeIndex;
+
+    // Compute per-eye view and projection matrices
+    glm::mat4 eyeView = worldUBO->eyeViewOffsets[eyeIndex] * worldUBO->cameraViewMat;
+    glm::mat4 eyeProj = worldUBO->eyeProjOffsets[eyeIndex] * worldUBO->cameraProjMat;
+    glm::mat4 lastEyeView = lastWorldUBO->eyeViewOffsets[eyeIndex] * lastWorldUBO->cameraViewMat;
+    glm::mat4 lastEyeProj = lastWorldUBO->eyeProjOffsets[eyeIndex] * lastWorldUBO->cameraProjMat;
+
     nrd::CommonSettings commonSettings = {};
     for (int i = 0; i < 4; ++i) {
         for (int j = 0; j < 4; ++j) {
-            commonSettings.viewToClipMatrix[i * 4 + j] = worldUBO->cameraProjMat[i][j];
-            commonSettings.viewToClipMatrixPrev[i * 4 + j] = lastWorldUBO->cameraProjMat[i][j];
-            commonSettings.worldToViewMatrix[i * 4 + j] = worldUBO->cameraViewMat[i][j];
-            commonSettings.worldToViewMatrixPrev[i * 4 + j] = lastWorldUBO->cameraViewMat[i][j];
+            commonSettings.viewToClipMatrix[i * 4 + j] = eyeProj[i][j];
+            commonSettings.viewToClipMatrixPrev[i * 4 + j] = lastEyeProj[i][j];
+            commonSettings.worldToViewMatrix[i * 4 + j] = eyeView[i][j];
+            commonSettings.worldToViewMatrixPrev[i * 4 + j] = lastEyeView[i][j];
         }
     }
 
@@ -265,25 +299,27 @@ void NrdModuleContext::render() {
     reblurSettings.historyFixFrameNum = 3;
     reblurSettings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_5X5;
 
+    uint32_t viewIdx = (module->eyeCount_ > 1) ? (1 + eyeIndex) : 0;
+
     {
-        auto prepareTable = module->prepareDescriptorTables_[context->frameIndex];
-        prepareTable->bindImage(motionVectorImage, VK_IMAGE_LAYOUT_GENERAL, 0, 0);
-        prepareTable->bindImage(normalRoughnessImage, VK_IMAGE_LAYOUT_GENERAL, 0, 1);
-        prepareTable->bindImage(linearDepthImage, VK_IMAGE_LAYOUT_GENERAL, 0, 2);
-        prepareTable->bindImage(diffuseRadianceImage, VK_IMAGE_LAYOUT_GENERAL, 0, 3);
-        prepareTable->bindImage(specularRadianceImage, VK_IMAGE_LAYOUT_GENERAL, 0, 4);
-        prepareTable->bindImage(module->m_nrdMotionVectorImages[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL, 0, 5);
-        prepareTable->bindImage(module->m_nrdNormalRoughnessImages[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL, 0, 6);
-        prepareTable->bindImage(module->m_nrdDiffuseRadianceImages[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL, 0, 7);
-        prepareTable->bindImage(module->m_nrdSpecularRadianceImages[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL, 0,
+        auto prepareTable = module->prepareDescriptorTables_[dtIdx];
+        prepareTable->bindImage(motionVectorImage, VK_IMAGE_LAYOUT_GENERAL, 0, 0, viewIdx);
+        prepareTable->bindImage(normalRoughnessImage, VK_IMAGE_LAYOUT_GENERAL, 0, 1, viewIdx);
+        prepareTable->bindImage(linearDepthImage, VK_IMAGE_LAYOUT_GENERAL, 0, 2, viewIdx);
+        prepareTable->bindImage(diffuseRadianceImage, VK_IMAGE_LAYOUT_GENERAL, 0, 3, viewIdx);
+        prepareTable->bindImage(specularRadianceImage, VK_IMAGE_LAYOUT_GENERAL, 0, 4, viewIdx);
+        prepareTable->bindImage(module->m_nrdMotionVectorImages[dtIdx], VK_IMAGE_LAYOUT_GENERAL, 0, 5);
+        prepareTable->bindImage(module->m_nrdNormalRoughnessImages[dtIdx], VK_IMAGE_LAYOUT_GENERAL, 0, 6);
+        prepareTable->bindImage(module->m_nrdDiffuseRadianceImages[dtIdx], VK_IMAGE_LAYOUT_GENERAL, 0, 7);
+        prepareTable->bindImage(module->m_nrdSpecularRadianceImages[dtIdx], VK_IMAGE_LAYOUT_GENERAL, 0,
                                 8);
-        prepareTable->bindImage(diffuseAlbedoImage, VK_IMAGE_LAYOUT_GENERAL, 0, 9);
-        prepareTable->bindImage(specularAlbedoImage, VK_IMAGE_LAYOUT_GENERAL, 0, 10);
-        prepareTable->bindImage(directRadianceImage, VK_IMAGE_LAYOUT_GENERAL, 0, 11);
-        prepareTable->bindImage(clearRadianceImage, VK_IMAGE_LAYOUT_GENERAL, 0, 12);
+        prepareTable->bindImage(diffuseAlbedoImage, VK_IMAGE_LAYOUT_GENERAL, 0, 9, viewIdx);
+        prepareTable->bindImage(specularAlbedoImage, VK_IMAGE_LAYOUT_GENERAL, 0, 10, viewIdx);
+        prepareTable->bindImage(directRadianceImage, VK_IMAGE_LAYOUT_GENERAL, 0, 11, viewIdx);
+        prepareTable->bindImage(clearRadianceImage, VK_IMAGE_LAYOUT_GENERAL, 0, 12, viewIdx);
         prepareTable->bindBuffer(Renderer::instance().buffers()->worldUniformBuffer(), 0, 13);
-        prepareTable->bindImage(diffuseHitDepthImage, VK_IMAGE_LAYOUT_GENERAL, 0, 14);
-        prepareTable->bindImage(specularHitDepthImage, VK_IMAGE_LAYOUT_GENERAL, 0, 15);
+        prepareTable->bindImage(diffuseHitDepthImage, VK_IMAGE_LAYOUT_GENERAL, 0, 14, viewIdx);
+        prepareTable->bindImage(specularHitDepthImage, VK_IMAGE_LAYOUT_GENERAL, 0, 15, viewIdx);
 
         worldCommandBuffer->bindDescriptorTable(prepareTable, VK_PIPELINE_BIND_POINT_COMPUTE)
             ->bindComputePipeline(module->preparePipeline_);
@@ -300,7 +336,7 @@ void NrdModuleContext::render() {
                      .newLayout = VK_IMAGE_LAYOUT_GENERAL,
                      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                     .image = module->m_nrdMotionVectorImages[context->frameIndex],
+                     .image = module->m_nrdMotionVectorImages[dtIdx],
                      .subresourceRange = vk::wholeColorSubresourceRange,
                  },
                  {
@@ -312,7 +348,7 @@ void NrdModuleContext::render() {
                      .newLayout = VK_IMAGE_LAYOUT_GENERAL,
                      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                     .image = module->m_nrdNormalRoughnessImages[context->frameIndex],
+                     .image = module->m_nrdNormalRoughnessImages[dtIdx],
                      .subresourceRange = vk::wholeColorSubresourceRange,
                  },
                  {
@@ -324,7 +360,7 @@ void NrdModuleContext::render() {
                      .newLayout = VK_IMAGE_LAYOUT_GENERAL,
                      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                     .image = module->m_nrdDiffuseRadianceImages[context->frameIndex],
+                     .image = module->m_nrdDiffuseRadianceImages[dtIdx],
                      .subresourceRange = vk::wholeColorSubresourceRange,
                  },
                  {
@@ -336,26 +372,60 @@ void NrdModuleContext::render() {
                      .newLayout = VK_IMAGE_LAYOUT_GENERAL,
                      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                     .image = module->m_nrdSpecularRadianceImages[context->frameIndex],
+                     .image = module->m_nrdSpecularRadianceImages[dtIdx],
                      .subresourceRange = vk::wholeColorSubresourceRange,
                  }});
     }
 
-    module->wrapper()->updateSettings(commonSettings, reblurSettings);
+    module->wrapper(eyeIndex)->updateSettings(commonSettings, reblurSettings);
+
+    // For stereo, copy the relevant layer of linearDepthImage to a single-layer image
+    // because NRD wrapper uses the default image view (which would be 2D_ARRAY for array images)
+    auto viewZImage = linearDepthImage;
+    if (module->eyeCount_ > 1 && !module->m_nrdLinearDepthImages.empty()) {
+        auto dst = module->m_nrdLinearDepthImages[dtIdx];
+        VkImageCopy region{};
+        region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, eyeIndex, 1};
+        region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.extent = {module->width_, module->height_, 1};
+        vkCmdCopyImage(worldCommandBuffer->vkCommandBuffer(),
+                       linearDepthImage->vkImage(), VK_IMAGE_LAYOUT_GENERAL,
+                       dst->vkImage(), VK_IMAGE_LAYOUT_GENERAL,
+                       1, &region);
+        worldCommandBuffer->barriersBufferImage(
+            {}, {{
+                     .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                     .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                     .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+                     .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+                     .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                     .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                     .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                     .image = dst,
+                     .subresourceRange = vk::wholeColorSubresourceRange,
+                 }});
+        viewZImage = dst;
+    }
+
+    auto denoisedDiffuse = module->denoisedDiffuseRadianceImages_[dtIdx];
+    auto denoisedSpecular = module->denoisedSpecularRadianceImages_[dtIdx];
 
     std::map<nrd::ResourceType, std::shared_ptr<vk::DeviceLocalImage>> userTextures;
-    userTextures[nrd::ResourceType::IN_MV] = module->m_nrdMotionVectorImages[context->frameIndex];
-    userTextures[nrd::ResourceType::IN_NORMAL_ROUGHNESS] = module->m_nrdNormalRoughnessImages[context->frameIndex];
-    userTextures[nrd::ResourceType::IN_VIEWZ] = linearDepthImage;
-    userTextures[nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST] = module->m_nrdDiffuseRadianceImages[context->frameIndex];
+    userTextures[nrd::ResourceType::IN_MV] = module->m_nrdMotionVectorImages[dtIdx];
+    userTextures[nrd::ResourceType::IN_NORMAL_ROUGHNESS] = module->m_nrdNormalRoughnessImages[dtIdx];
+    userTextures[nrd::ResourceType::IN_VIEWZ] = viewZImage;
+    userTextures[nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST] = module->m_nrdDiffuseRadianceImages[dtIdx];
     userTextures[nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST] =
-        module->m_nrdSpecularRadianceImages[context->frameIndex];
-    userTextures[nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST] = denoisedDiffuseRadianceImage;
-    userTextures[nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST] = denoisedSpecularRadianceImage;
+        module->m_nrdSpecularRadianceImages[dtIdx];
+    userTextures[nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST] = denoisedDiffuse;
+    userTextures[nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST] = denoisedSpecular;
 
-    module->wrapper()->denoise(worldCommandBuffer->vkCommandBuffer(), context->frameIndex, userTextures);
+    module->wrapper(eyeIndex)->denoise(worldCommandBuffer->vkCommandBuffer(), context->frameIndex, userTextures);
 
     std::vector<vk::CommandBuffer::ImageMemoryBarrier> barriers;
+    bool stereo = module->eyeCount_ > 1;
+
     auto ensureGeneral = [&](std::shared_ptr<vk::DeviceLocalImage> img) {
         if (!img) return;
         if (img->imageLayout() == VK_IMAGE_LAYOUT_GENERAL) return;
@@ -399,23 +469,30 @@ void NrdModuleContext::render() {
         });
         img->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     };
-    addBarrier(diffuseAlbedoImage);
-    addBarrier(specularAlbedoImage);
-    addBarrier(normalRoughnessImage);
-    addBarrier(linearDepthImage);
-    addBarrier(denoisedDiffuseRadianceImage);
-    addBarrier(denoisedSpecularRadianceImage);
-    addBarrier(clearRadianceImage);
-    addBarrier(baseEmissionImage);
 
-    if (directRadianceImage->imageLayout() == VK_IMAGE_LAYOUT_GENERAL) { addBarrier(directRadianceImage); }
+    // In stereo, shared pipeline input images stay in GENERAL (both eyes need them).
+    // Compose will bind them with GENERAL layout.
+    if (!stereo) {
+        addBarrier(diffuseAlbedoImage);
+        addBarrier(specularAlbedoImage);
+        addBarrier(normalRoughnessImage);
+        addBarrier(linearDepthImage);
+        addBarrier(clearRadianceImage);
+        addBarrier(baseEmissionImage);
+        if (directRadianceImage->imageLayout() == VK_IMAGE_LAYOUT_GENERAL) { addBarrier(directRadianceImage); }
+    }
+    // Per-eye denoised images always need barrier
+    addBarrier(denoisedDiffuse);
+    addBarrier(denoisedSpecular);
 
     worldCommandBuffer->barriersBufferImage({}, barriers);
 
+    VkImageLayout samplerLayout = stereo ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
     std::map<std::string, std::shared_ptr<vk::DeviceLocalImage>> composeInputs;
     composeInputs["direct"] = directRadianceImage;
-    composeInputs["diffuse"] = denoisedDiffuseRadianceImage;
-    composeInputs["specular"] = denoisedSpecularRadianceImage;
+    composeInputs["diffuse"] = denoisedDiffuse;
+    composeInputs["specular"] = denoisedSpecular;
     composeInputs["albedo"] = diffuseAlbedoImage;
     composeInputs["specularAlbedo"] = specularAlbedoImage;
     composeInputs["normal"] = normalRoughnessImage;
@@ -423,8 +500,8 @@ void NrdModuleContext::render() {
     composeInputs["clearRadiance"] = clearRadianceImage;
     composeInputs["baseEmission"] = baseEmissionImage;
 
-    module->dispatchComposition(worldCommandBuffer, context->frameIndex, composeInputs, buffers->worldUniformBuffer(),
-                                denoisedRadianceImage);
+    module->dispatchComposition(worldCommandBuffer, context->frameIndex, eyeIndex, composeInputs,
+                                buffers->worldUniformBuffer(), denoisedRadianceImage);
 
     denoisedRadianceImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
 }
@@ -502,6 +579,7 @@ void NrdModule::createCompositionPipeline(std::shared_ptr<vk::Device> device, ui
 
 void NrdModule::dispatchComposition(std::shared_ptr<vk::CommandBuffer> cmd,
                                     uint32_t frameIndex,
+                                    uint32_t eyeIndex,
                                     const std::map<std::string, std::shared_ptr<vk::DeviceLocalImage>> &images,
                                     std::shared_ptr<vk::HostVisibleBuffer> worldUBO,
                                     std::shared_ptr<vk::DeviceLocalImage> outputImage) {
@@ -511,28 +589,35 @@ void NrdModule::dispatchComposition(std::shared_ptr<vk::CommandBuffer> cmd,
         return;
     }
 
-    auto descriptorTable = composeDescriptorTables_[frameIndex];
+    uint32_t dtIdx = frameIndex * eyeCount_ + eyeIndex;
+    uint32_t viewIdx = (eyeCount_ > 1) ? (1 + eyeIndex) : 0;
+    bool stereo = eyeCount_ > 1;
+    // In stereo: shared pipeline inputs stay GENERAL, per-eye denoised images are SHADER_READ_ONLY
+    VkImageLayout sharedLayout = stereo ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkImageLayout denoisedLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    descriptorTable->bindImage(outputImage, VK_IMAGE_LAYOUT_GENERAL, 0, 0);
+    auto descriptorTable = composeDescriptorTables_[dtIdx];
+
+    descriptorTable->bindImage(outputImage, VK_IMAGE_LAYOUT_GENERAL, 0, 0, viewIdx);
     descriptorTable->bindSamplerImage(composeSamplers_[0], images.at("direct"),
-                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 1, 0);
+                                      sharedLayout, 0, 1, 0, viewIdx);
     descriptorTable->bindSamplerImage(composeSamplers_[0], images.at("diffuse"),
-                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 2, 0);
+                                      denoisedLayout, 0, 2, 0);
     descriptorTable->bindSamplerImage(composeSamplers_[0], images.at("specular"),
-                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 3, 0);
+                                      denoisedLayout, 0, 3, 0);
     descriptorTable->bindSamplerImage(composeSamplers_[0], images.at("albedo"),
-                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 4, 0);
+                                      sharedLayout, 0, 4, 0, viewIdx);
     descriptorTable->bindSamplerImage(composeSamplers_[1], images.at("normal"),
-                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 5, 0);
-    descriptorTable->bindSamplerImage(composeSamplers_[1], images.at("depth"), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                      0, 6, 0);
+                                      sharedLayout, 0, 5, 0, viewIdx);
+    descriptorTable->bindSamplerImage(composeSamplers_[1], images.at("depth"),
+                                      sharedLayout, 0, 6, 0, viewIdx);
     descriptorTable->bindBuffer(worldUBO, 0, 7);
     descriptorTable->bindSamplerImage(composeSamplers_[0], images.at("specularAlbedo"),
-                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 8, 0);
+                                      sharedLayout, 0, 8, 0, viewIdx);
     descriptorTable->bindSamplerImage(composeSamplers_[0], images.at("clearRadiance"),
-                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 9, 0);
+                                      sharedLayout, 0, 9, 0, viewIdx);
     descriptorTable->bindSamplerImage(composeSamplers_[0], images.at("baseEmission"),
-                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 10, 0);
+                                      sharedLayout, 0, 10, 0, viewIdx);
 
     cmd->bindDescriptorTable(descriptorTable, VK_PIPELINE_BIND_POINT_COMPUTE)->bindComputePipeline(composePipeline_);
 

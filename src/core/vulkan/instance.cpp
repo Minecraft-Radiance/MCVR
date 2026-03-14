@@ -6,6 +6,8 @@
 #include <set>
 #include <vector>
 
+std::vector<std::string> vk::Instance::extraExtensions{};
+
 #ifndef NDEBUG
 const bool ENABLE_DEBUGGING = true;
 #else
@@ -88,6 +90,9 @@ vk::Instance::Instance() {
     // dynamic vertex input state ext
     // repeated for dlss, but make sure
     extStorage.insert(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+
+    // Extra extensions (e.g. from OpenXR)
+    for (const auto &ext : extraExtensions) { extStorage.insert(ext); }
 
     // if (ENABLE_DEBUGGING) { push_ext(VK_EXT_DEBUG_REPORT_EXTENSION_NAME); }
 

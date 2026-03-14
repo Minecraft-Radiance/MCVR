@@ -346,6 +346,61 @@ void Buffers::setAndUploadWorldUniformBuffer(vk::Data::WorldUBO &ubo) {
     ubo.cameraPos.z = world->getCameraPos().z;
     ubo.cameraPos.w = 0;
 
+    // VR stereo fields
+    auto &vr = Renderer::instance().vrSystem();
+    if (vr.enabled && vr.eyeCount > 1) {
+        // VR path: headView (physical HMD tracking) * worldOrientation (game world rotation).
+        // worldOrientation is set from Java each frame and encodes all game-world
+        // rotation (player body yaw, stick/mouse turning, elytra roll, etc.).
+        // The MC cameraViewMat is NOT used here — VR has its own rotation source.
+        if (vr.headPose.valid) {
+            glm::mat4 headView = vr.headPose.viewMatrix();
+            glm::mat4 worldRot = glm::mat4_cast(glm::inverse(vr.worldOrientation));
+            ubo.cameraViewMat = headView * worldRot;
+            ubo.cameraEffectedViewMat = headView * worldRot;
+            ubo.cameraViewMatInv = glm::inverse(ubo.cameraViewMat);
+            ubo.cameraEffectedViewMatInv = glm::inverse(ubo.cameraEffectedViewMat);
+
+            // Apply physical HMD offset (relative to worldPosition) to cameraPos.
+            // This lets small head movements (lean, duck) shift the camera naturally.
+            glm::vec3 trackingOffset = vr.headPose.position - vr.worldPosition;
+            // Rotate tracking-space offset into game world space via worldOrientation
+            glm::vec3 worldOffset = vr.worldOrientation * trackingOffset;
+            worldOffset *= vr.config.worldScale;
+            ubo.cameraPos.x += worldOffset.x;
+            ubo.cameraPos.y += worldOffset.y;
+            ubo.cameraPos.z += worldOffset.z;
+        }
+
+        ubo.stereoEnabled = 1;
+        ubo.ipd = vr.config.ipd;
+        for (uint32_t eye = 0; eye < 2; eye++) {
+            ubo.eyeViewOffsets[eye] = vr.eyes[eye].viewOffset();
+            // Compute per-eye projection correction relative to the base camera projection.
+            // eyeProjOffsets[eye] = eyeProjection * inverse(cameraProjMat)
+            // This lets the shader transform from the base projection to the per-eye asymmetric one.
+            glm::mat4 eyeProj = vr.eyes[eye].projectionMatrix(0.05f, 1000.0f);
+            ubo.eyeProjOffsets[eye] = eyeProj * glm::inverse(ubo.cameraProjMat);
+        }
+    } else {
+        ubo.stereoEnabled = 0;
+        ubo.ipd = 0.0f;
+        for (uint32_t eye = 0; eye < 2; eye++) {
+            ubo.eyeViewOffsets[eye] = glm::mat4(1.0f);
+            ubo.eyeProjOffsets[eye] = glm::mat4(1.0f);
+        }
+    }
+
+    ubo.foveatedInnerRadius = foveatedInnerRadius_;
+    ubo.foveatedOuterBlockSize = foveatedOuterBlockSize_;
+
+    // Foveated centre: use eye gaze if valid, otherwise screen centre
+    if (vr.enabled && vr.gazeValid) {
+        ubo.foveatedCenter = {vr.gazePoint.x, vr.gazePoint.y};
+    } else {
+        ubo.foveatedCenter = {0.5f, 0.5f};
+    }
+
     if (worldUniformBuffer_[context->frameIndex] == nullptr) {
         worldUniformBuffer_[context->frameIndex] =
             vk::HostVisibleBuffer::create(vma, device, sizeof(vk::Data::WorldUBO),
@@ -531,4 +586,12 @@ std::shared_ptr<vk::HostVisibleBuffer> Buffers::lightMapUniformBuffer() {
 
 void Buffers::setUseJitter(bool useJitter) {
     useJitter_ = useJitter;
+}
+
+void Buffers::setFoveatedInnerRadius(float radius) {
+    foveatedInnerRadius_ = radius;
+}
+
+void Buffers::setFoveatedOuterBlockSize(uint32_t blockSize) {
+    foveatedOuterBlockSize_ = blockSize;
 }

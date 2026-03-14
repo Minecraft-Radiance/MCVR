@@ -48,6 +48,8 @@ class DLSSModule : public WorldModule, public SharedObject<DLSSModule> {
 
     void preClose() override;
 
+    StereoMode stereoMode() const override { return StereoMode::DualInstance; }
+
   private:
     static std::shared_ptr<NgxContext> ngxContext_;
 
@@ -62,7 +64,7 @@ class DLSSModule : public WorldModule, public SharedObject<DLSSModule> {
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> firstHitDepthImages_;
 
     // dlss
-    std::shared_ptr<DlssRR> dlss_;
+    std::vector<std::shared_ptr<DlssRR>> dlssInstances_;
     NgxContext::SupportedSizes supportedSizes_{};
     NVSDK_NGX_PerfQuality_Value mode_ = NVSDK_NGX_PerfQuality_Value_Balanced;
 
@@ -78,6 +80,9 @@ class DLSSModule : public WorldModule, public SharedObject<DLSSModule> {
 
 struct DLSSModuleContext : public WorldModuleContext, SharedObject<DLSSModuleContext> {
     std::weak_ptr<DLSSModule> dLSSModule;
+
+    StereoMode stereoMode() const override { return StereoMode::DualInstance; }
+    void renderEye(uint32_t eyeIndex) override;
 
     // input
     std::shared_ptr<vk::DeviceLocalImage> hdrImage;
@@ -98,4 +103,7 @@ struct DLSSModuleContext : public WorldModuleContext, SharedObject<DLSSModuleCon
                       std::shared_ptr<DLSSModule> dLSSModule);
 
     void render() override;
+
+  private:
+    uint32_t eyeCount_;
 };

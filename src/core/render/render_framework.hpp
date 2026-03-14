@@ -7,6 +7,11 @@
 #include "core/vulkan/all_core_vulkan.hpp"
 #include "core/render/modules/world/dlss/dlss_wrapper.hpp"
 
+#ifdef MCVR_ENABLE_OPENXR
+#include "core/render/openxr_context.hpp"
+#include <memory>
+#endif
+
 #include <map>
 #include <mutex>
 
@@ -78,6 +83,12 @@ class Framework : public SharedObject<Framework> {
 
     void takeScreenshot(bool withUI, int width, int height, int channel, void *dstPointer);
 
+  #ifdef MCVR_ENABLE_OPENXR
+    bool startXRSession();
+    void stopXRSession();
+    bool isXRSessionRunning() const;
+  #endif
+
     std::recursive_mutex &recreateMtx();
 
     std::shared_ptr<vk::Instance> instance();
@@ -117,7 +128,6 @@ class Framework : public SharedObject<Framework> {
     std::vector<std::shared_ptr<vk::CommandBuffer>> uploadCommandBuffers_;
     std::vector<std::shared_ptr<vk::CommandBuffer>> overlayCommandBuffers_;
     std::vector<std::shared_ptr<vk::CommandBuffer>> worldCommandBuffers_;
-    std::vector<std::shared_ptr<vk::CommandBuffer>> fuseCommandBuffers_;
     std::shared_ptr<vk::CommandBuffer> worldAsyncCommandBuffer_;
 
     std::shared_ptr<Pipeline> pipeline_;
@@ -137,6 +147,19 @@ class Framework : public SharedObject<Framework> {
     bool running_ = true;
 
     std::shared_ptr<GarbageCollector> gc_;
+
+#ifdef MCVR_ENABLE_OPENXR
+    std::unique_ptr<OpenXRContext> xrContext_;
+    bool xrVRPopulated_ = false;
+    VkQueryPool gpuTimestampPool_ = VK_NULL_HANDLE;
+    float timestampPeriodNs_ = 0.0f;
+  bool xrLastSessionRunning_ = false;
+  uint32_t xrLastSwapchainWidth_ = 0;
+  uint32_t xrLastSwapchainHeight_ = 0;
+public:
+    OpenXRContext *xrContext() { return xrContext_.get(); }
+private:
+#endif
 };
 
 template <typename T>

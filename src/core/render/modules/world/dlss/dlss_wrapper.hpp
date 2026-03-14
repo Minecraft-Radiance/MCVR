@@ -168,8 +168,9 @@ class DlssRR : public SharedObject<DlssRR> {
         RESOURCE_NUM
     };
 
-    // Associate a DlssRR resource with a Vulkan texture
-    void setResource(DlssResource resourceId, std::shared_ptr<vk::DeviceLocalImage> image);
+    // Associate a DlssRR resource with a Vulkan texture.
+    // viewIndex: 0 = whole image (default), 1+ = per-layer view for stereo array images
+    void setResource(DlssResource resourceId, std::shared_ptr<vk::DeviceLocalImage> image, uint32_t viewIndex = 0);
     void resetResource(DlssResource resourceId);
 
     // Perform the actual denoising.

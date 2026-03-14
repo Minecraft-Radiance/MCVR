@@ -12,6 +12,10 @@ layout(set = 1, binding = 0) uniform WorldUniform {
     WorldUBO worldUBO;
 };
 
+layout(push_constant) uniform PushConstant {
+    uint eyeIndex;
+} pc;
+
 layout(location = 0) in vec3 inPos;
 layout(location = 1) in uint inUseNorm;
 layout(location = 2) in vec3 inNorm;
@@ -49,11 +53,18 @@ layout(location = 15) out vec4 lightMapColor;
 layout(location = 16) out vec4 overlayColor;
 
 void main() {
+    // Per-eye view offset
+    mat4 eyeViewOffset = worldUBO.eyeViewOffsets[pc.eyeIndex];
+    mat4 eyeView = eyeViewOffset * worldUBO.cameraEffectedViewMat;
+    mat4 eyeViewOffsetInv = mat4(1.0);
+    eyeViewOffsetInv[3] = vec4(-eyeViewOffset[3].xyz, 1.0);
+    mat4 eyeViewInv = worldUBO.cameraViewMatInv * eyeViewOffsetInv;
+
     vec3 pos = inPos + inPostBase;
     if (inCoordinate == 0) {
-        pos = pos - worldUBO.cameraViewMatInv[3].xyz;
+        pos = pos - eyeViewInv[3].xyz;
     } else if (inCoordinate == 1) {
-        pos = mat3(worldUBO.cameraViewMatInv) * pos;
+        pos = mat3(eyeViewInv) * pos;
     } else if (inCoordinate == 2) {
         pos = pos;
     }
@@ -62,7 +73,7 @@ void main() {
     if (inCoordinate == 0 || inCoordinate == 2) {
         outNorm = inNorm;
     } else if (inCoordinate == 1) {
-        outNorm = normalize(mat3(worldUBO.cameraViewMatInv) * inNorm);
+        outNorm = normalize(mat3(eyeViewInv) * inNorm);
     }
     outUseColorLayer = inUseColorLayer;
     outColorLayer = inColorLayer;
@@ -77,7 +88,7 @@ void main() {
     outUseLight = inUseLight;
     outLightUV = inLightUV;
 
-    gl_Position = worldUBO.cameraProjMat * worldUBO.cameraEffectedViewMat * vec4(pos, 1.0);
+    gl_Position = worldUBO.eyeProjOffsets[pc.eyeIndex] * worldUBO.cameraProjMat * eyeView * vec4(pos, 1.0);
 
     if (inUseLight > 0) {
         lightMapColor = texelFetch(lightMap, inLightUV / 16, 0);

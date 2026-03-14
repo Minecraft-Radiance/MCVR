@@ -397,6 +397,31 @@ void vk::DeviceLocalImage::addImageView(VkImageViewCreateInfo info) {
     imageViews_.push_back(vkImageView);
 }
 
+void vk::DeviceLocalImage::createPerLayerViews() {
+    if (layer_ <= 1) return;
+    for (uint32_t i = 0; i < layer_; i++) {
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = image_;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = format_;
+        viewInfo.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                               VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
+        viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, i, 1};
+        addImageView(viewInfo);
+    }
+}
+
+VkImageView vk::DeviceLocalImage::perLayerView(uint32_t layerIndex) {
+    // Per-layer views start at index 1 (index 0 is the whole-image view)
+    uint32_t viewIndex = 1 + layerIndex;
+    if (viewIndex >= imageViews_.size()) {
+        imageCerr() << "perLayerView: layerIndex " << layerIndex << " out of range" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+    return imageViews_[viewIndex];
+}
+
 vk::Sampler::Sampler(std::shared_ptr<Device> device)
     : Sampler(device, VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT) {}
 

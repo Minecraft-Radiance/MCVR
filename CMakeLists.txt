@@ -126,4 +126,26 @@ else()
     message(STATUS "NRD Denoiser Disabled")
 endif()
 
+# OpenXR SDK
+option(MCVR_ENABLE_OPENXR "Enable OpenXR VR support" ON)
+
+if (MCVR_ENABLE_OPENXR)
+    message(STATUS "OpenXR Support Enabled")
+    include(FetchContent)
+    FetchContent_Declare(
+        openxr_sdk
+        GIT_REPOSITORY https://github.com/KhronosGroup/OpenXR-SDK.git
+        GIT_TAG        release-1.1.43
+        GIT_SHALLOW    TRUE
+        EXCLUDE_FROM_ALL
+    )
+    set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(BUILD_API_LAYERS OFF CACHE BOOL "" FORCE)
+    set(BUILD_CONFORMANCE_TESTS OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(openxr_sdk)
+    set(OPENXR_INCLUDE_DIR ${openxr_sdk_SOURCE_DIR}/include)
+else()
+    message(STATUS "OpenXR Support Disabled")
+endif()
+
 add_subdirectory(src)

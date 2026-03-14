@@ -9,6 +9,8 @@
 #include <unordered_set>
 #include <vector>
 
+std::vector<std::string> vk::Device::extraExtensions{};
+
 std::ostream &deviceCout() {
     return std::cout << "[Device] ";
 }
@@ -53,6 +55,10 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
             enabledExtensions.push_back(dlssExtensions[i].extensionName);
         }
     }
+
+    // Extra extensions (e.g. from OpenXR)
+    // Store as const char* pointers — the static vector owns the strings.
+    for (const auto &ext : extraExtensions) { enabledExtensions.push_back(ext.c_str()); }
 
     uint32_t deviceExtensionCount = 0;
     vkEnumerateDeviceExtensionProperties(physicalDevice_->vkPhysicalDevice(), nullptr, &deviceExtensionCount, nullptr);

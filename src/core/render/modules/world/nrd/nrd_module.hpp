@@ -33,12 +33,15 @@ class NrdModule : public WorldModule, public SharedObject<NrdModule> {
     bindTexture(std::shared_ptr<vk::Sampler> sampler, std::shared_ptr<vk::DeviceLocalImage> image, int index) override;
     void preClose() override;
 
-    std::shared_ptr<NrdWrapper> wrapper() {
-        return m_wrapper;
+    std::shared_ptr<NrdWrapper> wrapper(uint32_t eyeIndex = 0) {
+        return m_wrappers.empty() ? nullptr : m_wrappers[eyeIndex];
     }
+
+    StereoMode stereoMode() const override { return StereoMode::DualInstance; }
 
     void dispatchComposition(std::shared_ptr<vk::CommandBuffer> cmd,
                              uint32_t frameIndex,
+                             uint32_t eyeIndex,
                              const std::map<std::string, std::shared_ptr<vk::DeviceLocalImage>> &images,
                              std::shared_ptr<vk::HostVisibleBuffer> worldUBO,
                              std::shared_ptr<vk::DeviceLocalImage> outputImage);
@@ -52,7 +55,8 @@ class NrdModule : public WorldModule, public SharedObject<NrdModule> {
     std::shared_ptr<vk::VMA> m_vma;
 
     std::vector<std::shared_ptr<WorldModuleContext>> contexts_;
-    std::shared_ptr<NrdWrapper> m_wrapper;
+    // m_wrappers[eyeIndex] — one NRD instance per eye for stereo
+    std::vector<std::shared_ptr<NrdWrapper>> m_wrappers;
 
     uint32_t maxAccumulatedFrameNum_ = 31;
     uint32_t maxFastAccumulatedFrameNum_ = 4;
@@ -78,15 +82,19 @@ class NrdModule : public WorldModule, public SharedObject<NrdModule> {
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> denoisedSpecularRadianceImages_;
 
     std::shared_ptr<vk::ComputePipeline> composePipeline_;
+    // composeDescriptorTables_[frameIndex * eyeCount_ + eyeIndex]
     std::vector<std::shared_ptr<vk::DescriptorTable>> composeDescriptorTables_;
     std::array<std::shared_ptr<vk::Sampler>, 2> composeSamplers_;
 
     std::shared_ptr<vk::ComputePipeline> preparePipeline_;
+    // prepareDescriptorTables_[frameIndex * eyeCount_ + eyeIndex]
     std::vector<std::shared_ptr<vk::DescriptorTable>> prepareDescriptorTables_;
+    // NRD intermediate images: [frameIndex * eyeCount_ + eyeIndex]
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> m_nrdMotionVectorImages;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> m_nrdNormalRoughnessImages;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> m_nrdDiffuseRadianceImages;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> m_nrdSpecularRadianceImages;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> m_nrdLinearDepthImages;
 
     void createCompositionPipeline(std::shared_ptr<vk::Device> device, uint32_t contextCount);
     void createPreparePipeline(std::shared_ptr<vk::Device> device, uint32_t contextCount);
@@ -98,7 +106,9 @@ class NrdModuleContext : public WorldModuleContext, public SharedObject<NrdModul
                      std::shared_ptr<WorldPipelineContext> worldPipelineContext,
                      std::shared_ptr<NrdModule> nrdModule);
 
+    StereoMode stereoMode() const override { return StereoMode::DualInstance; }
     void render() override;
+    void renderEye(uint32_t eyeIndex) override;
 
   private:
     std::weak_ptr<NrdModule> nrdModule;

@@ -11,6 +11,8 @@ class Framework;
 class Buffers;
 class World;
 
+#include "core/render/vr_system.hpp"
+
 struct Options {
     uint32_t maxFps = 1e6;
     uint32_t inactivityFpsLimit = 1e6;
@@ -25,6 +27,11 @@ struct Options {
 
     uint32_t chunkBuildingBatchSize = 2;
     uint32_t chunkBuildingTotalBatches = 4;
+
+    bool vrEnabled = false;
+    float vrRenderScale = 0.5f;
+    float vrIPD = 0.063f;
+    float vrWorldScale = 1.0f;
 };
 
 class Renderer : public Singleton<Renderer> {
@@ -40,6 +47,7 @@ class Renderer : public Singleton<Renderer> {
     std::shared_ptr<Textures> textures();
     std::shared_ptr<Buffers> buffers();
     std::shared_ptr<World> world();
+    VRSystem &vrSystem() { return vrSystem_; }
 
     void close();
 
@@ -50,4 +58,5 @@ class Renderer : public Singleton<Renderer> {
     std::shared_ptr<Textures> textures_;
     std::shared_ptr<Buffers> buffers_;
     std::shared_ptr<World> world_;
+    VRSystem vrSystem_;
 };

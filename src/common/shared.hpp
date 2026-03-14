@@ -247,6 +247,15 @@ namespace Data {
         T_UINT endPortalTextureID;
         T_UINT pad4;
         T_UINT pad5;
+
+        // VR stereo fields
+        T_MAT4 eyeViewOffsets[2];     // per-eye view offset (translate ±ipd/2)
+        T_MAT4 eyeProjOffsets[2];     // per-eye projection offset (identity for symmetric)
+        T_FLOAT ipd;
+        T_UINT  stereoEnabled;        // 0=mono, 1=stereo
+        T_FLOAT foveatedInnerRadius;  // normalized radius of full-res inner circle (1.0 = full screen)
+        T_UINT  foveatedOuterBlockSize; // block size for outer region (1=off, 2=2x2, 4=4x4)
+        T_VEC2  foveatedCenter;        // normalised gaze centre (0.5,0.5 = screen centre)
     };
 
     struct SkyUBO {
