@@ -38,6 +38,7 @@
  */
 
 #include "core/render/modules/world/dlss/dlss_wrapper.hpp"
+#include "core/render/modules/world/dlss/dlssg_wrapper.hpp"
 
 // #include <nvh/nvprint.hpp>
 // #include <nvp/nvpsystem.hpp>
@@ -48,6 +49,7 @@
 #include <nvsdk_ngx_helpers_dlssd.h>
 #include <nvsdk_ngx_helpers_dlssd_vk.h>
 #include <nvsdk_ngx_helpers_vk.h>
+#include <nvsdk_ngx_helpers_dlssg_vk.h>
 
 #include <glm/ext.hpp>
 
@@ -211,6 +213,36 @@ NVSDK_NGX_Result NgxContext::initDlssRR(const DlssRRInitInfo &initInfo,
                                         std::shared_ptr<vk::CommandPool> cmdPool,
                                         std::shared_ptr<DlssRR> dlssrr) {
     NGX_RETURN_ON_FAIL(dlssrr->init(device_, cmdPool, ngxParams_, initInfo));
+    return NVSDK_NGX_Result_Success;
+}
+
+NVSDK_NGX_Result NgxContext::queryFrameGenAvailable() {
+    assert(ngxParams_);
+
+    int fgAvailable = 0;
+    NVSDK_NGX_Result res =
+        NGX_CHECK(ngxParams_->Get(NVSDK_NGX_Parameter_FrameGeneration_Available, &fgAvailable));
+    if (NVSDK_NGX_FAILED(res) || !fgAvailable) {
+        LOGW << "Frame Generation not available on this hardware/platform" << std::endl;
+        return NVSDK_NGX_Result_FAIL_FeatureNotSupported;
+    }
+
+    int needsUpdatedDriver = 0;
+    NVSDK_NGX_Result resDriver =
+        ngxParams_->Get(NVSDK_NGX_Parameter_FrameGeneration_NeedsUpdatedDriver, &needsUpdatedDriver);
+    if (NVSDK_NGX_SUCCEED(resDriver) && needsUpdatedDriver) {
+        LOGW << "Frame Generation requires a newer driver" << std::endl;
+        return NVSDK_NGX_Result_FAIL_OutOfDate;
+    }
+
+    LOGI << "Frame Generation is available" << std::endl;
+    return NVSDK_NGX_Result_Success;
+}
+
+NVSDK_NGX_Result NgxContext::initFrameGen(const DlssFGInitInfo &initInfo,
+                                          std::shared_ptr<vk::CommandPool> cmdPool,
+                                          std::shared_ptr<DlssFG> dlssfg) {
+    NGX_RETURN_ON_FAIL(dlssfg->init(device_, cmdPool, ngxParams_, initInfo.width, initInfo.height, initInfo.backbufferFormat));
     return NVSDK_NGX_Result_Success;
 }
 

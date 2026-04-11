@@ -46,6 +46,11 @@ void DLSSModule::deinitNGXContext() {
     }
 }
 
+bool DLSSModule::isFrameGenAvailable() {
+    if (ngxContext_ == nullptr) return false;
+    return ngxContext_->queryFrameGenAvailable() == NVSDK_NGX_Result_Success;
+}
+
 DLSSModule::DLSSModule() {}
 
 void DLSSModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
@@ -63,6 +68,7 @@ void DLSSModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<Worl
     firstHitDepthImages_.resize(size);
     processedImages_.resize(size);
     upscaledFirstHitDepthImages_.resize(size);
+    interpFrameImages_.resize(size);
 
     dlss_ = DlssRR::create();
 }
@@ -199,6 +205,8 @@ void DLSSModule::setAttributes(int attributeCount, std::vector<std::string> &att
             } else if (attributeKVs[2 * i + 1] == "render_pipeline.module.dlss.attribute.mode.dlaa") {
                 mode_ = NVSDK_NGX_PerfQuality_Value_DLAA;
             }
+        } else if (attributeKVs[2 * i] == "render_pipeline.module.dlss.attribute.frame_generation") {
+            frameGenEnabled_ = (attributeKVs[2 * i + 1] == "render_pipeline.module.dlss.attribute.frame_generation.on");
         }
     }
 }
@@ -215,6 +223,29 @@ void DLSSModule::build() {
     dlssRRInitInfo.outputSize = {outputWidth_, outputHeight_};
     dlssRRInitInfo.quality = mode_;
     ngxContext_->initDlssRR(dlssRRInitInfo, framework->mainCommandPool(), dlss_);
+
+    // Initialize Frame Generation if enabled and available
+    if (frameGenEnabled_ && ngxContext_->queryFrameGenAvailable() == NVSDK_NGX_Result_Success) {
+        dlssFG_ = DlssFG::create();
+        NgxContext::DlssFGInitInfo fgInitInfo{};
+        fgInitInfo.width = outputWidth_;
+        fgInitInfo.height = outputHeight_;
+        fgInitInfo.backbufferFormat = framework->swapchain()->vkSurfaceFormat().format;
+        if (ngxContext_->initFrameGen(fgInitInfo, framework->mainCommandPool(), dlssFG_) != NVSDK_NGX_Result_Success) {
+            std::cerr << "[DLSS] Frame Generation initialization failed" << std::endl;
+            dlssFG_ = nullptr;
+        } else {
+            // Create interpolated frame images
+            for (uint32_t i = 0; i < size; i++) {
+                interpFrameImages_[i] = vk::DeviceLocalImage::create(
+                    framework->device(), framework->vma(), false, outputWidth_, outputHeight_, 1,
+                    framework->swapchain()->vkSurfaceFormat().format,
+                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                        VK_IMAGE_USAGE_SAMPLED_BIT);
+            }
+            std::cout << "[DLSS] Frame Generation initialized successfully" << std::endl;
+        }
+    }
 
     contexts_.resize(size);
 
@@ -233,6 +264,7 @@ void DLSSModule::bindTexture(std::shared_ptr<vk::Sampler> sampler,
                              int index) {}
 
 void DLSSModule::preClose() {
+    if (dlssFG_) { dlssFG_->deinit(); dlssFG_ = nullptr; }
     dlss_->deinit();
 }
 

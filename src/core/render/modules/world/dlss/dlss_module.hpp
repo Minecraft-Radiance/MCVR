@@ -6,6 +6,7 @@
 #include "core/vulkan/all_core_vulkan.hpp"
 
 #include "core/render/modules/world/dlss/dlss_wrapper.hpp"
+#include "core/render/modules/world/dlss/dlssg_wrapper.hpp"
 #include "core/render/modules/world/world_module.hpp"
 
 class Framework;
@@ -25,6 +26,8 @@ class DLSSModule : public WorldModule, public SharedObject<DLSSModule> {
 
     static bool initNGXContext();
     static void deinitNGXContext();
+    static std::shared_ptr<NgxContext> ngxContext() { return ngxContext_; }
+    static bool isFrameGenAvailable();
 
     DLSSModule();
 
@@ -48,6 +51,14 @@ class DLSSModule : public WorldModule, public SharedObject<DLSSModule> {
 
     void preClose() override;
 
+    bool isFrameGenEnabled() const { return frameGenEnabled_ && dlssFG_ != nullptr; }
+    std::shared_ptr<DlssFG> dlssFG() { return dlssFG_; }
+    std::shared_ptr<vk::DeviceLocalImage> interpFrameImage(uint32_t frameIndex) { return interpFrameImages_[frameIndex]; }
+    std::shared_ptr<vk::DeviceLocalImage> motionVectorImage(uint32_t frameIndex) { return motionVectorImages_[frameIndex]; }
+    std::shared_ptr<vk::DeviceLocalImage> linearDepthImage(uint32_t frameIndex) { return linearDepthImages_[frameIndex]; }
+    uint32_t outputWidth() const { return outputWidth_; }
+    uint32_t outputHeight() const { return outputHeight_; }
+
   private:
     static std::shared_ptr<NgxContext> ngxContext_;
 
@@ -65,6 +76,11 @@ class DLSSModule : public WorldModule, public SharedObject<DLSSModule> {
     std::shared_ptr<DlssRR> dlss_;
     NgxContext::SupportedSizes supportedSizes_{};
     NVSDK_NGX_PerfQuality_Value mode_ = NVSDK_NGX_PerfQuality_Value_Balanced;
+
+    // frame generation
+    bool frameGenEnabled_ = false;
+    std::shared_ptr<DlssFG> dlssFG_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> interpFrameImages_;
 
     // output
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> processedImages_;
