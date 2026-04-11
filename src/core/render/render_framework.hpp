@@ -141,6 +141,8 @@ class Framework : public SharedObject<Framework> {
 
     // Frame Generation state
     bool frameGenActive_ = false;
+    uint32_t frameGenInterpCount_ = 0; // number of interp frames generated this frame
+    uint64_t backbufferFrameID_ = 0;
     glm::mat4 prevViewMatrix_ = glm::mat4(1.0f);
     glm::mat4 prevProjMatrix_ = glm::mat4(1.0f);
     bool hasPrevMatrices_ = false;

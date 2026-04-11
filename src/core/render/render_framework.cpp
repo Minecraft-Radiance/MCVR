@@ -160,62 +160,29 @@ void FrameworkContext::evaluateFrameGeneration() {
     }
     if (!dlssModule || !dlssModule->isFrameGenEnabled()) {
         f->frameGenActive_ = false;
+        f->frameGenInterpCount_ = 0;
         return;
     }
 
     auto dlssFG = dlssModule->dlssFG();
-    auto interpFrame = dlssModule->interpFrameImage(frameIndex);
     auto depthImage = dlssModule->linearDepthImage(frameIndex);
     auto mvecsImage = dlssModule->motionVectorImage(frameIndex);
+    uint32_t multiFrameCount = dlssModule->frameGenMultiFrameCount();
 
-    if (!dlssFG || !interpFrame || !depthImage || !mvecsImage) {
+    if (!dlssFG || !depthImage || !mvecsImage || multiFrameCount == 0) {
         f->frameGenActive_ = false;
+        f->frameGenInterpCount_ = 0;
         return;
     }
 
     auto mainQueueIndex = physicalDevice->mainQueueIndex();
-
-    // Transition swapchain from PRESENT_SRC to GENERAL for FG read
-    // Transition interp frame to GENERAL for FG write
-    fuseCommandBuffer->barriersBufferImage(
-        {}, {{
-                 .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
-                 .oldLayout = swapchainImage->imageLayout(),
-                 .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-                 .srcQueueFamilyIndex = mainQueueIndex,
-                 .dstQueueFamilyIndex = mainQueueIndex,
-                 .image = swapchainImage,
-                 .subresourceRange = vk::wholeColorSubresourceRange,
-             },
-             {
-                 .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .oldLayout = interpFrame->imageLayout(),
-                 .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-                 .srcQueueFamilyIndex = mainQueueIndex,
-                 .dstQueueFamilyIndex = mainQueueIndex,
-                 .image = interpFrame,
-                 .subresourceRange = vk::wholeColorSubresourceRange,
-             }});
-    swapchainImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
-    interpFrame->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
-
-    // Set FG resources
-    dlssFG->setResource(DlssFG::RESOURCE_BACKBUFFER, swapchainImage, false);
-    dlssFG->setResource(DlssFG::RESOURCE_DEPTH, depthImage, false);
-    dlssFG->setResource(DlssFG::RESOURCE_MVECS, mvecsImage, false);
-    dlssFG->setResource(DlssFG::RESOURCE_OUTPUT_INTERP, interpFrame, true);
 
     // Get camera data from WorldUBO
     auto worldUBOBuffer = Renderer::instance().buffers()->worldUniformBuffer();
     auto worldUBO = static_cast<vk::Data::WorldUBO *>(worldUBOBuffer->mappedPtr());
     if (worldUBO == nullptr) {
         f->frameGenActive_ = false;
+        f->frameGenInterpCount_ = 0;
         return;
     }
 
@@ -235,20 +202,106 @@ void FrameworkContext::evaluateFrameGeneration() {
     glm::mat4 prevView = f->hasPrevMatrices_ ? f->prevViewMatrix_ : viewMatrix;
     glm::mat4 prevProj = f->hasPrevMatrices_ ? f->prevProjMatrix_ : projMatrix;
 
-    NVSDK_NGX_Result result = dlssFG->evaluate(
-        fuseCommandBuffer, viewMatrix, projMatrix, prevView, prevProj,
-        jitter, cameraPos, cameraNear, cameraFar, cameraFOV, cameraAspectRatio, reset);
+    // Transition swapchain from PRESENT_SRC to GENERAL for FG read
+    fuseCommandBuffer->barriersBufferImage(
+        {}, {{
+                 .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                 .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
+                 .oldLayout = swapchainImage->imageLayout(),
+                 .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                 .srcQueueFamilyIndex = mainQueueIndex,
+                 .dstQueueFamilyIndex = mainQueueIndex,
+                 .image = swapchainImage,
+                 .subresourceRange = vk::wholeColorSubresourceRange,
+             }});
+    swapchainImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+
+    bool allSucceeded = true;
+
+    // Loop over all intermediate frames (multiFrameIndex: 1..multiFrameCount)
+    for (uint32_t mfi = 1; mfi <= multiFrameCount; mfi++) {
+        auto interpFrame = dlssModule->interpFrameImage(frameIndex, mfi - 1);
+        if (!interpFrame) { allSucceeded = false; break; }
+
+        // Transition interp frame to GENERAL for FG write
+        fuseCommandBuffer->barriersBufferImage(
+            {}, {{
+                     .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                     .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                     .oldLayout = interpFrame->imageLayout(),
+                     .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                     .srcQueueFamilyIndex = mainQueueIndex,
+                     .dstQueueFamilyIndex = mainQueueIndex,
+                     .image = interpFrame,
+                     .subresourceRange = vk::wholeColorSubresourceRange,
+                 }});
+        interpFrame->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+
+        // Set FG resources — output changes per iteration
+        dlssFG->setResource(DlssFG::RESOURCE_BACKBUFFER, swapchainImage, false);
+        dlssFG->setResource(DlssFG::RESOURCE_DEPTH, depthImage, false);
+        dlssFG->setResource(DlssFG::RESOURCE_MVECS, mvecsImage, false);
+        dlssFG->setResource(DlssFG::RESOURCE_OUTPUT_INTERP, interpFrame, true);
+
+        NVSDK_NGX_Result result = dlssFG->evaluate(
+            fuseCommandBuffer, viewMatrix, projMatrix, prevView, prevProj,
+            jitter, cameraPos, cameraNear, cameraFar, cameraFOV, cameraAspectRatio,
+            multiFrameCount, mfi, reset);
+
+        if (NVSDK_NGX_FAILED(result)) {
+            std::cerr << "[DLSS-FG] Frame Generation evaluate failed for multiFrameIndex " << mfi << std::endl;
+            allSucceeded = false;
+            // Transition this interp frame back anyway
+            fuseCommandBuffer->barriersBufferImage(
+                {}, {{
+                         .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
+                         .oldLayout = interpFrame->imageLayout(),
+                         .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                         .srcQueueFamilyIndex = mainQueueIndex,
+                         .dstQueueFamilyIndex = mainQueueIndex,
+                         .image = interpFrame,
+                         .subresourceRange = vk::wholeColorSubresourceRange,
+                     }});
+            interpFrame->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            break;
+        }
+
+        // Transition interp frame to TRANSFER_SRC for later blit
+        fuseCommandBuffer->barriersBufferImage(
+            {}, {{
+                     .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+                     .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
+                     .oldLayout = interpFrame->imageLayout(),
+                     .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                     .srcQueueFamilyIndex = mainQueueIndex,
+                     .dstQueueFamilyIndex = mainQueueIndex,
+                     .image = interpFrame,
+                     .subresourceRange = vk::wholeColorSubresourceRange,
+                 }});
+        interpFrame->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    }
 
     // Store current matrices for next frame
     f->prevViewMatrix_ = viewMatrix;
     f->prevProjMatrix_ = projMatrix;
     f->hasPrevMatrices_ = true;
+    f->backbufferFrameID_++;
 
-    if (NVSDK_NGX_SUCCEED(result)) {
+    if (allSucceeded) {
         f->frameGenActive_ = true;
+        f->frameGenInterpCount_ = multiFrameCount;
     } else {
         f->frameGenActive_ = false;
-        std::cerr << "[DLSS-FG] Frame Generation evaluate failed" << std::endl;
+        f->frameGenInterpCount_ = 0;
     }
 
     // Transition swapchain back to PRESENT_SRC_KHR
@@ -264,21 +317,8 @@ void FrameworkContext::evaluateFrameGeneration() {
                  .dstQueueFamilyIndex = mainQueueIndex,
                  .image = swapchainImage,
                  .subresourceRange = vk::wholeColorSubresourceRange,
-             },
-             {
-                 .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
-                 .oldLayout = interpFrame->imageLayout(),
-                 .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                 .srcQueueFamilyIndex = mainQueueIndex,
-                 .dstQueueFamilyIndex = mainQueueIndex,
-                 .image = interpFrame,
-                 .subresourceRange = vk::wholeColorSubresourceRange,
              }});
     swapchainImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    interpFrame->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 }
 
 Framework::Framework() {}
@@ -473,9 +513,9 @@ void Framework::present() {
         exit(EXIT_FAILURE);
     }
 
-    // Double-present: present interpolated frame if Frame Generation produced one
-    if (frameGenActive_) {
-        // Find the DLSS module to get the interpolated frame
+    // Multi-present: present interpolated frame(s) if Frame Generation produced them
+    if (frameGenActive_ && frameGenInterpCount_ > 0) {
+        // Find the DLSS module to get the interpolated frames
         std::shared_ptr<DLSSModule> dlssModule;
         auto worldPipeline = pipeline_->worldPipeline();
         if (worldPipeline) {
@@ -486,8 +526,10 @@ void Framework::present() {
         }
 
         if (dlssModule && dlssModule->isFrameGenEnabled()) {
-            auto interpFrame = dlssModule->interpFrameImage(currentContext_->frameIndex);
-            if (interpFrame) {
+            for (uint32_t interpIdx = 0; interpIdx < frameGenInterpCount_; interpIdx++) {
+                auto interpFrame = dlssModule->interpFrameImage(currentContext_->frameIndex, interpIdx);
+                if (!interpFrame) break;
+
                 // Acquire a new swapchain image for the interpolated frame
                 std::shared_ptr<vk::Semaphore> interpAcquireSem = acquireSemaphore();
                 uint32_t interpIndex;
@@ -589,10 +631,12 @@ void Framework::present() {
                     recycleSemaphore(interpAcquireSem);
                 } else {
                     recycleSemaphore(interpAcquireSem);
+                    break; // Can't acquire more images
                 }
             }
         }
         frameGenActive_ = false;
+        frameGenInterpCount_ = 0;
     }
 }
 
@@ -627,6 +671,7 @@ void Framework::recreate() {
     interpBlitCommandBuffers_.clear();
     interpProcessedSemaphores_.clear();
     frameGenActive_ = false;
+    frameGenInterpCount_ = 0;
     hasPrevMatrices_ = false;
 
     swapchain_->reconstruct();

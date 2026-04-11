@@ -51,9 +51,10 @@ class DLSSModule : public WorldModule, public SharedObject<DLSSModule> {
 
     void preClose() override;
 
-    bool isFrameGenEnabled() const { return frameGenEnabled_ && dlssFG_ != nullptr; }
+    bool isFrameGenEnabled() const { return frameGenMultiFrameCount_ > 0 && dlssFG_ != nullptr; }
+    uint32_t frameGenMultiFrameCount() const { return frameGenMultiFrameCount_; }
     std::shared_ptr<DlssFG> dlssFG() { return dlssFG_; }
-    std::shared_ptr<vk::DeviceLocalImage> interpFrameImage(uint32_t frameIndex) { return interpFrameImages_[frameIndex]; }
+    std::shared_ptr<vk::DeviceLocalImage> interpFrameImage(uint32_t frameIndex, uint32_t interpIndex) { return interpFrameImages_[frameIndex][interpIndex]; }
     std::shared_ptr<vk::DeviceLocalImage> motionVectorImage(uint32_t frameIndex) { return motionVectorImages_[frameIndex]; }
     std::shared_ptr<vk::DeviceLocalImage> linearDepthImage(uint32_t frameIndex) { return linearDepthImages_[frameIndex]; }
     uint32_t outputWidth() const { return outputWidth_; }
@@ -78,9 +79,11 @@ class DLSSModule : public WorldModule, public SharedObject<DLSSModule> {
     NVSDK_NGX_PerfQuality_Value mode_ = NVSDK_NGX_PerfQuality_Value_Balanced;
 
     // frame generation
-    bool frameGenEnabled_ = false;
+    // 0 = disabled, 1 = 2x, 2 = 3x, 3 = 4x, etc.
+    uint32_t frameGenMultiFrameCount_ = 0;
     std::shared_ptr<DlssFG> dlssFG_;
-    std::vector<std::shared_ptr<vk::DeviceLocalImage>> interpFrameImages_;
+    // interpFrameImages_[swapchainIndex][interpIndex] — one per interpolated frame
+    std::vector<std::vector<std::shared_ptr<vk::DeviceLocalImage>>> interpFrameImages_;
 
     // output
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> processedImages_;

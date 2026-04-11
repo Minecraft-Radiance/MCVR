@@ -60,6 +60,8 @@ class DlssFG : public SharedObject<DlssFG> {
                               float cameraFar,
                               float cameraFOV,
                               float cameraAspectRatio,
+                              uint32_t multiFrameCount = 1,
+                              uint32_t multiFrameIndex = 1,
                               bool reset = false);
 
     void deinit();

@@ -125,6 +125,10 @@ class NgxContext : public SharedObject<NgxContext> {
     // Check if DLSS Frame Generation is available
     NVSDK_NGX_Result queryFrameGenAvailable();
 
+    // Query maximum supported multi-frame generation count (1 = 2x only, 3 = up to 4x, etc.)
+    // Returns 1 if MFG is not supported (plain 2x FG only)
+    uint32_t queryMaxMultiFrameCount();
+
     struct DlssFGInitInfo {
         uint32_t width = 0;
         uint32_t height = 0;

@@ -239,6 +239,24 @@ NVSDK_NGX_Result NgxContext::queryFrameGenAvailable() {
     return NVSDK_NGX_Result_Success;
 }
 
+uint32_t NgxContext::queryMaxMultiFrameCount() {
+    assert(ngxParams_);
+    unsigned int maxCount = 0;
+    // Use device capability parameters to query MFG support
+    NVSDK_NGX_Parameter *capParams = nullptr;
+    NVSDK_NGX_Result res = NVSDK_NGX_VULKAN_GetCapabilityParameters(&capParams);
+    if (NVSDK_NGX_SUCCEED(res) && capParams) {
+        capParams->Get(NVSDK_NGX_DLSSG_Parameter_MultiFrameCountMax, &maxCount);
+        NVSDK_NGX_VULKAN_DestroyParameters(capParams);
+    }
+    if (maxCount <= 1) {
+        // Also try the regular ngxParams_ as fallback
+        ngxParams_->Get(NVSDK_NGX_DLSSG_Parameter_MultiFrameCountMax, &maxCount);
+    }
+    LOGI << "Max multi-frame count: " << maxCount << " (0 or 1 = 2x only)" << std::endl;
+    return maxCount <= 1 ? 1 : maxCount;
+}
+
 NVSDK_NGX_Result NgxContext::initFrameGen(const DlssFGInitInfo &initInfo,
                                           std::shared_ptr<vk::CommandPool> cmdPool,
                                           std::shared_ptr<DlssFG> dlssfg) {

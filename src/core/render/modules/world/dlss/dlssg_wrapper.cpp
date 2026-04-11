@@ -118,6 +118,8 @@ NVSDK_NGX_Result DlssFG::evaluate(std::shared_ptr<vk::CommandBuffer> cmdBuffer,
                                    float cameraFar,
                                    float cameraFOV,
                                    float cameraAspectRatio,
+                                   uint32_t multiFrameCount,
+                                   uint32_t multiFrameIndex,
                                    bool reset) {
     assert(m_dlssgHandle);
 
@@ -149,8 +151,8 @@ NVSDK_NGX_Result DlssFG::evaluate(std::shared_ptr<vk::CommandBuffer> cmdBuffer,
     glm::mat4 prevClipToClip = currentViewProj * glm::inverse(prevViewProj);
 
     NVSDK_NGX_DLSSG_Opt_Eval_Params optParams{};
-    optParams.multiFrameCount = 1;
-    optParams.multiFrameIndex = 1;
+    optParams.multiFrameCount = multiFrameCount;
+    optParams.multiFrameIndex = multiFrameIndex;
 
     // GLM is column-major, DLSS-G expects row-major with left-multiply.
     // Same trick as DLSS-RR: (M^T)^T = M, so supply original matrices directly.
