@@ -188,7 +188,9 @@ bool DLSSModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::DeviceL
 void DLSSModule::setAttributes(int attributeCount, std::vector<std::string> &attributeKVs) {
     for (int i = 0; i < attributeCount; i++) {
         if (attributeKVs[2 * i] == "render_pipeline.module.dlss.attribute.mode") {
-            if (attributeKVs[2 * i + 1] == "render_pipeline.module.dlss.attribute.mode.performance") {
+            if (attributeKVs[2 * i + 1] == "render_pipeline.module.dlss.attribute.mode.ultra_performance") {
+                mode_ = NVSDK_NGX_PerfQuality_Value_UltraPerformance;
+            } else if (attributeKVs[2 * i + 1] == "render_pipeline.module.dlss.attribute.mode.performance") {
                 mode_ = NVSDK_NGX_PerfQuality_Value_MaxPerf;
             } else if (attributeKVs[2 * i + 1] == "render_pipeline.module.dlss.attribute.mode.balanced") {
                 mode_ = NVSDK_NGX_PerfQuality_Value_Balanced;
