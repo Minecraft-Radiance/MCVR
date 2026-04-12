@@ -158,15 +158,7 @@ class Framework : public SharedObject<Framework> {
     std::vector<std::shared_ptr<vk::Semaphore>> interpProcessedSemaphores_;
     std::vector<std::shared_ptr<vk::Fence>> interpBlitFences_;
 
-    // Pending interp frames from previous render frame (pipelined presentation)
-    struct PendingInterpPresent {
-        std::vector<std::shared_ptr<vk::DeviceLocalImage>> interpFrames;
-        uint32_t sourceFrameIndex = 0; // swapchain index that produced these
-    };
-    PendingInterpPresent pendingInterp_;
-    bool hasPendingInterp_ = false;
-
-    void presentPendingInterpolatedFrames();
+    void presentInterpolatedFrames();
 
     std::shared_ptr<GarbageCollector> gc_;
 };

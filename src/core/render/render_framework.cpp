@@ -521,10 +521,6 @@ void Framework::submitCommand() {
 void Framework::present() {
     if (!running_) return;
 
-    // Present pending interpolated frames from PREVIOUS render frame (pipelined)
-    // By now the GPU fence for that frame is guaranteed signaled, so waits are near-instant
-    presentPendingInterpolatedFrames();
-
     VkPresentInfoKHR presentInfo = {};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.waitSemaphoreCount = 1;
@@ -546,45 +542,34 @@ void Framework::present() {
         exit(EXIT_FAILURE);
     }
 
-    // Store current frame's interpolated frames for pipelined presentation next frame
+    // Present interpolated frames immediately after the real frame (same-frame presentation)
+    // This keeps the DLSS-G SDK's internal present tracking consistent so the FG indicator stays on
     if (frameGenActive_ && frameGenInterpCount_ > 0) {
-        std::shared_ptr<DLSSModule> dlssModule;
-        auto worldPipeline = pipeline_->worldPipeline();
-        if (worldPipeline) {
-            for (auto &mod : worldPipeline->worldModules()) {
-                dlssModule = std::dynamic_pointer_cast<DLSSModule>(mod);
-                if (dlssModule) break;
-            }
-        }
-
-        if (dlssModule && dlssModule->isFrameGenEnabled()) {
-            pendingInterp_.interpFrames.clear();
-            pendingInterp_.sourceFrameIndex = currentContext_->frameIndex;
-            for (uint32_t i = 0; i < frameGenInterpCount_; i++) {
-                auto img = dlssModule->interpFrameImage(currentContext_->frameIndex, i);
-                if (!img) break;
-                pendingInterp_.interpFrames.push_back(img);
-            }
-            hasPendingInterp_ = !pendingInterp_.interpFrames.empty();
-        } else {
-            hasPendingInterp_ = false;
-        }
-
-        frameGenActive_ = false;
-        frameGenInterpCount_ = 0;
+        presentInterpolatedFrames();
     }
+
+    frameGenActive_ = false;
+    frameGenInterpCount_ = 0;
 }
 
-void Framework::presentPendingInterpolatedFrames() {
-    if (!hasPendingInterp_ || pendingInterp_.interpFrames.empty()) return;
-    hasPendingInterp_ = false;
+void Framework::presentInterpolatedFrames() {
+    // Wait for GPU to finish current frame's commands (includes FG evaluate writing interp images)
+    auto fence = commandFinishedFences_[currentContextIndex_];
+    vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
 
-    // Wait for the source frame's GPU commands (including FG evaluate) to complete
-    auto sourceFence = commandFinishedFences_[pendingInterp_.sourceFrameIndex];
-    vkWaitForFences(device_->vkDevice(), 1, &sourceFence->vkFence(), true, UINT64_MAX);
+    std::shared_ptr<DLSSModule> dlssModule;
+    auto worldPipeline = pipeline_->worldPipeline();
+    if (worldPipeline) {
+        for (auto &mod : worldPipeline->worldModules()) {
+            dlssModule = std::dynamic_pointer_cast<DLSSModule>(mod);
+            if (dlssModule) break;
+        }
+    }
+    if (!dlssModule || !dlssModule->isFrameGenEnabled()) return;
 
-    for (size_t interpIdx = 0; interpIdx < pendingInterp_.interpFrames.size(); interpIdx++) {
-        auto interpFrame = pendingInterp_.interpFrames[interpIdx];
+    for (uint32_t interpIdx = 0; interpIdx < frameGenInterpCount_; interpIdx++) {
+        auto interpFrame = dlssModule->interpFrameImage(currentContextIndex_, interpIdx);
+        if (!interpFrame) break;
 
         // Acquire a new swapchain image for the interpolated frame
         std::shared_ptr<vk::Semaphore> interpAcquireSem = acquireSemaphore();
@@ -691,8 +676,6 @@ void Framework::presentPendingInterpolatedFrames() {
 
         recycleSemaphore(interpAcquireSem);
     }
-
-    pendingInterp_.interpFrames.clear();
 }
 
 void Framework::recreate() {
@@ -703,10 +686,6 @@ void Framework::recreate() {
     Renderer::options.needRecreate = false;
     vk::Window::framebufferResized = false;
     pipeline_->needRecreate = false;
-
-    // Discard any pending interpolated frames
-    hasPendingInterp_ = false;
-    pendingInterp_.interpFrames.clear();
 
     waitRenderQueueIdle();
 
