@@ -179,6 +179,11 @@ void FrameworkContext::evaluateFrameGeneration() {
 
     // Get camera data from WorldUBO
     auto worldUBOBuffer = Renderer::instance().buffers()->worldUniformBuffer();
+    if (!worldUBOBuffer) {
+        f->frameGenActive_ = false;
+        f->frameGenInterpCount_ = 0;
+        return;
+    }
     auto worldUBO = static_cast<vk::Data::WorldUBO *>(worldUBOBuffer->mappedPtr());
     if (worldUBO == nullptr) {
         f->frameGenActive_ = false;
@@ -351,10 +356,11 @@ void Framework::init(GLFWwindow *window) {
 
     for (int i = 0; i < imageCount; i++) { contexts_.push_back(FrameworkContext::create(shared_from_this(), i)); }
 
-    // Frame Generation resources
+    // Frame Generation pipelined-present resources
     for (int i = 0; i < imageCount; i++) {
         interpBlitCommandBuffers_.emplace_back(vk::CommandBuffer::create(device_, mainCommandPool_));
         interpProcessedSemaphores_.push_back(vk::Semaphore::create(device_));
+        interpBlitFences_.push_back(vk::Fence::create(device_, true));
     }
 
     pipeline_ = Pipeline::create(shared_from_this());
@@ -492,6 +498,10 @@ void Framework::submitCommand() {
 void Framework::present() {
     if (!running_) return;
 
+    // Present pending interpolated frames from PREVIOUS render frame (pipelined)
+    // By now the GPU fence for that frame is guaranteed signaled, so waits are near-instant
+    presentPendingInterpolatedFrames();
+
     VkPresentInfoKHR presentInfo = {};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.waitSemaphoreCount = 1;
@@ -513,9 +523,8 @@ void Framework::present() {
         exit(EXIT_FAILURE);
     }
 
-    // Multi-present: present interpolated frame(s) if Frame Generation produced them
+    // Store current frame's interpolated frames for pipelined presentation next frame
     if (frameGenActive_ && frameGenInterpCount_ > 0) {
-        // Find the DLSS module to get the interpolated frames
         std::shared_ptr<DLSSModule> dlssModule;
         auto worldPipeline = pipeline_->worldPipeline();
         if (worldPipeline) {
@@ -526,118 +535,141 @@ void Framework::present() {
         }
 
         if (dlssModule && dlssModule->isFrameGenEnabled()) {
-            for (uint32_t interpIdx = 0; interpIdx < frameGenInterpCount_; interpIdx++) {
-                auto interpFrame = dlssModule->interpFrameImage(currentContext_->frameIndex, interpIdx);
-                if (!interpFrame) break;
-
-                // Acquire a new swapchain image for the interpolated frame
-                std::shared_ptr<vk::Semaphore> interpAcquireSem = acquireSemaphore();
-                uint32_t interpIndex;
-                VkResult acquireResult = vkAcquireNextImageKHR(
-                    device_->vkDevice(), swapchain_->vkSwapchain(), UINT64_MAX,
-                    interpAcquireSem->vkSemaphore(), VK_NULL_HANDLE, &interpIndex);
-
-                if (acquireResult == VK_SUCCESS || acquireResult == VK_SUBOPTIMAL_KHR) {
-                    // Wait for the target image's fence
-                    auto targetFence = commandFinishedFences_[interpIndex];
-                    vkWaitForFences(device_->vkDevice(), 1, &targetFence->vkFence(), true, UINT64_MAX);
-
-                    auto interpBlitCmd = interpBlitCommandBuffers_[interpIndex];
-                    auto interpSwapImage = swapchain_->swapchainImages()[interpIndex];
-                    auto mainQueueIndex = physicalDevice_->mainQueueIndex();
-
-                    interpBlitCmd->begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
-
-                    // Transition swapchain image to TRANSFER_DST
-                    interpBlitCmd->barriersBufferImage(
-                        {}, {{
-                                 .srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                                 .srcAccessMask = 0,
-                                 .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                                 .dstAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
-                                 .oldLayout = interpSwapImage->imageLayout(),
-                                 .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                 .srcQueueFamilyIndex = mainQueueIndex,
-                                 .dstQueueFamilyIndex = mainQueueIndex,
-                                 .image = interpSwapImage,
-                                 .subresourceRange = vk::wholeColorSubresourceRange,
-                             }});
-
-                    // Blit interpolated frame → swapchain image
-                    VkImageBlit blit{};
-                    blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-                    blit.srcOffsets[0] = {0, 0, 0};
-                    blit.srcOffsets[1] = {static_cast<int>(interpFrame->width()),
-                                          static_cast<int>(interpFrame->height()), 1};
-                    blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-                    blit.dstOffsets[0] = {0, 0, 0};
-                    blit.dstOffsets[1] = {static_cast<int>(interpSwapImage->width()),
-                                          static_cast<int>(interpSwapImage->height()), 1};
-                    vkCmdBlitImage(interpBlitCmd->vkCommandBuffer(),
-                                   interpFrame->vkImage(), interpFrame->imageLayout(),
-                                   interpSwapImage->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                   1, &blit, VK_FILTER_LINEAR);
-
-                    // Transition swapchain image to PRESENT_SRC
-                    interpBlitCmd->barriersBufferImage(
-                        {}, {{
-                                 .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                                 .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
-                                 .dstStageMask = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
-                                 .dstAccessMask = 0,
-                                 .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                 .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                                 .srcQueueFamilyIndex = mainQueueIndex,
-                                 .dstQueueFamilyIndex = mainQueueIndex,
-                                 .image = interpSwapImage,
-                                 .subresourceRange = vk::wholeColorSubresourceRange,
-                             }});
-                    interpSwapImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-                    interpBlitCmd->end();
-
-                    // Submit blit
-                    VkSemaphore waitSem = interpAcquireSem->vkSemaphore();
-                    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-                    VkSemaphore signalSem = interpProcessedSemaphores_[interpIndex]->vkSemaphore();
-
-                    VkSubmitInfo interpSubmit = {};
-                    interpSubmit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-                    interpSubmit.waitSemaphoreCount = 1;
-                    interpSubmit.pWaitSemaphores = &waitSem;
-                    interpSubmit.pWaitDstStageMask = &waitStage;
-                    interpSubmit.commandBufferCount = 1;
-                    interpSubmit.pCommandBuffers = &interpBlitCmd->vkCommandBuffer();
-                    interpSubmit.signalSemaphoreCount = 1;
-                    interpSubmit.pSignalSemaphores = &signalSem;
-
-                    vkResetFences(device_->vkDevice(), 1, &targetFence->vkFence());
-                    vkQueueSubmit(device_->mainVkQueue(), 1, &interpSubmit, targetFence->vkFence());
-
-                    // Present interpolated frame
-                    VkPresentInfoKHR interpPresentInfo = {};
-                    interpPresentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-                    interpPresentInfo.waitSemaphoreCount = 1;
-                    interpPresentInfo.pWaitSemaphores = &signalSem;
-                    interpPresentInfo.swapchainCount = 1;
-                    interpPresentInfo.pSwapchains = &swapchain_->vkSwapchain();
-                    interpPresentInfo.pImageIndices = &interpIndex;
-
-                    VkResult interpResult = vkQueuePresentKHR(device_->mainVkQueue(), &interpPresentInfo);
-                    if (interpResult == VK_ERROR_OUT_OF_DATE_KHR || interpResult == VK_SUBOPTIMAL_KHR) {
-                        // Swapchain needs recreation, will be handled next frame
-                    }
-
-                    recycleSemaphore(interpAcquireSem);
-                } else {
-                    recycleSemaphore(interpAcquireSem);
-                    break; // Can't acquire more images
-                }
+            pendingInterp_.interpFrames.clear();
+            pendingInterp_.sourceFrameIndex = currentContext_->frameIndex;
+            for (uint32_t i = 0; i < frameGenInterpCount_; i++) {
+                auto img = dlssModule->interpFrameImage(currentContext_->frameIndex, i);
+                if (!img) break;
+                pendingInterp_.interpFrames.push_back(img);
             }
+            hasPendingInterp_ = !pendingInterp_.interpFrames.empty();
+        } else {
+            hasPendingInterp_ = false;
         }
+
         frameGenActive_ = false;
         frameGenInterpCount_ = 0;
     }
+}
+
+void Framework::presentPendingInterpolatedFrames() {
+    if (!hasPendingInterp_ || pendingInterp_.interpFrames.empty()) return;
+    hasPendingInterp_ = false;
+
+    // Wait for the source frame's GPU commands (including FG evaluate) to complete
+    auto sourceFence = commandFinishedFences_[pendingInterp_.sourceFrameIndex];
+    vkWaitForFences(device_->vkDevice(), 1, &sourceFence->vkFence(), true, UINT64_MAX);
+
+    for (size_t interpIdx = 0; interpIdx < pendingInterp_.interpFrames.size(); interpIdx++) {
+        auto interpFrame = pendingInterp_.interpFrames[interpIdx];
+
+        // Acquire a new swapchain image for the interpolated frame
+        std::shared_ptr<vk::Semaphore> interpAcquireSem = acquireSemaphore();
+        uint32_t interpIndex;
+        VkResult acquireResult = vkAcquireNextImageKHR(
+            device_->vkDevice(), swapchain_->vkSwapchain(), UINT64_MAX,
+            interpAcquireSem->vkSemaphore(), VK_NULL_HANDLE, &interpIndex);
+
+        if (acquireResult != VK_SUCCESS && acquireResult != VK_SUBOPTIMAL_KHR) {
+            recycleSemaphore(interpAcquireSem);
+            break;
+        }
+
+        // Wait for the interp blit fence on this swapchain index
+        auto blitFence = interpBlitFences_[interpIndex];
+        vkWaitForFences(device_->vkDevice(), 1, &blitFence->vkFence(), true, UINT64_MAX);
+
+        auto interpBlitCmd = interpBlitCommandBuffers_[interpIndex];
+        auto interpSwapImage = swapchain_->swapchainImages()[interpIndex];
+        auto mainQueueIndex = physicalDevice_->mainQueueIndex();
+
+        interpBlitCmd->begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+
+        // Transition swapchain image to TRANSFER_DST
+        interpBlitCmd->barriersBufferImage(
+            {}, {{
+                     .srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                     .srcAccessMask = 0,
+                     .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .dstAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+                     .oldLayout = interpSwapImage->imageLayout(),
+                     .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     .srcQueueFamilyIndex = mainQueueIndex,
+                     .dstQueueFamilyIndex = mainQueueIndex,
+                     .image = interpSwapImage,
+                     .subresourceRange = vk::wholeColorSubresourceRange,
+                 }});
+
+        // Blit interpolated frame → swapchain image
+        VkImageBlit blit{};
+        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        blit.srcOffsets[0] = {0, 0, 0};
+        blit.srcOffsets[1] = {static_cast<int>(interpFrame->width()),
+                              static_cast<int>(interpFrame->height()), 1};
+        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        blit.dstOffsets[0] = {0, 0, 0};
+        blit.dstOffsets[1] = {static_cast<int>(interpSwapImage->width()),
+                              static_cast<int>(interpSwapImage->height()), 1};
+        vkCmdBlitImage(interpBlitCmd->vkCommandBuffer(),
+                       interpFrame->vkImage(), interpFrame->imageLayout(),
+                       interpSwapImage->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       1, &blit, VK_FILTER_LINEAR);
+
+        // Transition swapchain image to PRESENT_SRC
+        interpBlitCmd->barriersBufferImage(
+            {}, {{
+                     .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+                     .dstStageMask = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+                     .dstAccessMask = 0,
+                     .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                     .srcQueueFamilyIndex = mainQueueIndex,
+                     .dstQueueFamilyIndex = mainQueueIndex,
+                     .image = interpSwapImage,
+                     .subresourceRange = vk::wholeColorSubresourceRange,
+                 }});
+        interpSwapImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+        interpBlitCmd->end();
+
+        // Submit blit
+        VkSemaphore waitSem = interpAcquireSem->vkSemaphore();
+        VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        VkSemaphore signalSem = interpProcessedSemaphores_[interpIndex]->vkSemaphore();
+
+        VkSubmitInfo interpSubmit = {};
+        interpSubmit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        interpSubmit.waitSemaphoreCount = 1;
+        interpSubmit.pWaitSemaphores = &waitSem;
+        interpSubmit.pWaitDstStageMask = &waitStage;
+        interpSubmit.commandBufferCount = 1;
+        interpSubmit.pCommandBuffers = &interpBlitCmd->vkCommandBuffer();
+        interpSubmit.signalSemaphoreCount = 1;
+        interpSubmit.pSignalSemaphores = &signalSem;
+
+        vkResetFences(device_->vkDevice(), 1, &blitFence->vkFence());
+        vkQueueSubmit(device_->mainVkQueue(), 1, &interpSubmit, blitFence->vkFence());
+
+        // Present interpolated frame
+        VkPresentInfoKHR interpPresentInfo = {};
+        interpPresentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        interpPresentInfo.waitSemaphoreCount = 1;
+        interpPresentInfo.pWaitSemaphores = &signalSem;
+        interpPresentInfo.swapchainCount = 1;
+        interpPresentInfo.pSwapchains = &swapchain_->vkSwapchain();
+        interpPresentInfo.pImageIndices = &interpIndex;
+
+        VkResult interpResult = vkQueuePresentKHR(device_->mainVkQueue(), &interpPresentInfo);
+        if (interpResult == VK_ERROR_OUT_OF_DATE_KHR || interpResult == VK_SUBOPTIMAL_KHR) {
+            recycleSemaphore(interpAcquireSem);
+            break; // Swapchain needs recreation, will be handled in present()
+        }
+
+        recycleSemaphore(interpAcquireSem);
+    }
+
+    pendingInterp_.interpFrames.clear();
 }
 
 void Framework::recreate() {
@@ -648,6 +680,10 @@ void Framework::recreate() {
     Renderer::options.needRecreate = false;
     vk::Window::framebufferResized = false;
     pipeline_->needRecreate = false;
+
+    // Discard any pending interpolated frames
+    hasPendingInterp_ = false;
+    pendingInterp_.interpFrames.clear();
 
     waitRenderQueueIdle();
 
@@ -670,6 +706,7 @@ void Framework::recreate() {
     commandProcessedSemaphores_.clear();
     interpBlitCommandBuffers_.clear();
     interpProcessedSemaphores_.clear();
+    interpBlitFences_.clear();
     frameGenActive_ = false;
     frameGenInterpCount_ = 0;
     hasPrevMatrices_ = false;
@@ -694,10 +731,11 @@ void Framework::recreate() {
 
     for (int i = 0; i < size; i++) { contexts_.push_back(FrameworkContext::create(shared_from_this(), i)); }
 
-    // Recreate Frame Generation resources
+    // Recreate Frame Generation pipelined-present resources
     for (int i = 0; i < size; i++) {
         interpBlitCommandBuffers_.emplace_back(vk::CommandBuffer::create(device_, mainCommandPool_));
         interpProcessedSemaphores_.push_back(vk::Semaphore::create(device_));
+        interpBlitFences_.push_back(vk::Fence::create(device_, true));
     }
 
     pipeline_->recreate(shared_from_this());
