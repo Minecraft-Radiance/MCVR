@@ -4,11 +4,13 @@
 #include "common/singleton.hpp"
 #include "core/all_extern.hpp"
 #include "core/render/modules/world/dlss/dlss_wrapper.hpp"
+#include "core/render/modules/world/dlss/dlssg_wrapper.hpp"
 #include "core/render/pipeline.hpp"
 #include "core/vulkan/all_core_vulkan.hpp"
 
 #include <map>
 #include <mutex>
+#include <chrono>
 
 class Framework;
 class UIModule;
@@ -56,6 +58,7 @@ struct FrameworkContext : public SharedObject<FrameworkContext> {
     ~FrameworkContext();
 
     void fuseFinal();
+    void evaluateFrameGeneration();
 };
 
 class Framework : public SharedObject<Framework> {
@@ -136,6 +139,26 @@ class Framework : public SharedObject<Framework> {
     std::recursive_mutex recreateMtx_;
 
     bool running_ = true;
+
+    // Frame Generation state
+    bool frameGenActive_ = false;
+    uint32_t frameGenInterpCount_ = 0; // number of interp frames generated this frame
+    uint64_t backbufferFrameID_ = 0;
+    glm::mat4 prevViewMatrix_ = glm::mat4(1.0f);
+    glm::mat4 prevProjMatrix_ = glm::mat4(1.0f);
+    bool hasPrevMatrices_ = false;
+
+    // Dynamic FG state
+    int monitorRefreshRate_ = 0;
+    std::chrono::high_resolution_clock::time_point lastBaseFrameTime_{};
+    bool hasLastBaseFrameTime_ = false;
+
+    // FG pipelined-present resources
+    std::vector<std::shared_ptr<vk::CommandBuffer>> interpBlitCommandBuffers_;
+    std::vector<std::shared_ptr<vk::Semaphore>> interpProcessedSemaphores_;
+    std::vector<std::shared_ptr<vk::Fence>> interpBlitFences_;
+
+    void presentInterpolatedFrames();
 
     std::shared_ptr<GarbageCollector> gc_;
 };

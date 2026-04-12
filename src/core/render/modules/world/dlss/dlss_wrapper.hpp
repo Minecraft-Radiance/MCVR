@@ -43,6 +43,7 @@
 
 #include "nvsdk_ngx_vk.h"
 #include "nvsdk_ngx_defs_dlssd.h"
+#include "nvsdk_ngx_defs_dlssg.h"
 
 #include <glm/glm.hpp>
 
@@ -71,6 +72,7 @@ NVSDK_NGX_Result checkNgxResult(NVSDK_NGX_Result result, const char *func, int l
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 class DlssRR;
+class DlssFG;
 
 class NgxContext : public SharedObject<NgxContext> {
   public:
@@ -119,6 +121,22 @@ class NgxContext : public SharedObject<NgxContext> {
     // Initialize a DlssRR instance. There can be multiple.
     NVSDK_NGX_Result
     initDlssRR(const DlssRRInitInfo &initInfo, std::shared_ptr<vk::CommandPool> cmdPool, std::shared_ptr<DlssRR> dlssrr);
+
+    // Check if DLSS Frame Generation is available
+    NVSDK_NGX_Result queryFrameGenAvailable();
+
+    // Query maximum supported multi-frame generation count (1 = 2x only, 3 = up to 4x, etc.)
+    // Returns 1 if MFG is not supported (plain 2x FG only)
+    uint32_t queryMaxMultiFrameCount();
+
+    struct DlssFGInitInfo {
+        uint32_t width = 0;
+        uint32_t height = 0;
+        VkFormat backbufferFormat = VK_FORMAT_B8G8R8A8_UNORM;
+    };
+    // Initialize a DlssFG instance
+    NVSDK_NGX_Result
+    initFrameGen(const DlssFGInitInfo &initInfo, std::shared_ptr<vk::CommandPool> cmdPool, std::shared_ptr<DlssFG> dlssfg);
 
     // Append 'extensions' with the instance extensions that should be enabled for DLSS_RR
     static NVSDK_NGX_Result getDlssRRRequiredInstanceExtensions(std::vector<VkExtensionProperties> &extensions);

@@ -1,5 +1,6 @@
 #include "core/render/modules/world/dlss/dlss_module.hpp"
 
+#include <cmath>
 #include "core/render/buffers.hpp"
 #include "core/render/pipeline.hpp"
 #include "core/render/render_framework.hpp"
@@ -46,6 +47,11 @@ void DLSSModule::deinitNGXContext() {
     }
 }
 
+bool DLSSModule::isFrameGenAvailable() {
+    if (ngxContext_ == nullptr) return false;
+    return ngxContext_->queryFrameGenAvailable() == NVSDK_NGX_Result_Success;
+}
+
 DLSSModule::DLSSModule() {}
 
 void DLSSModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
@@ -63,6 +69,7 @@ void DLSSModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<Worl
     firstHitDepthImages_.resize(size);
     processedImages_.resize(size);
     upscaledFirstHitDepthImages_.resize(size);
+    interpFrameImages_.resize(size);
 
     dlss_ = DlssRR::create();
 }
@@ -188,7 +195,9 @@ bool DLSSModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::DeviceL
 void DLSSModule::setAttributes(int attributeCount, std::vector<std::string> &attributeKVs) {
     for (int i = 0; i < attributeCount; i++) {
         if (attributeKVs[2 * i] == "render_pipeline.module.dlss.attribute.mode") {
-            if (attributeKVs[2 * i + 1] == "render_pipeline.module.dlss.attribute.mode.performance") {
+            if (attributeKVs[2 * i + 1] == "render_pipeline.module.dlss.attribute.mode.ultra_performance") {
+                mode_ = NVSDK_NGX_PerfQuality_Value_UltraPerformance;
+            } else if (attributeKVs[2 * i + 1] == "render_pipeline.module.dlss.attribute.mode.performance") {
                 mode_ = NVSDK_NGX_PerfQuality_Value_MaxPerf;
             } else if (attributeKVs[2 * i + 1] == "render_pipeline.module.dlss.attribute.mode.balanced") {
                 mode_ = NVSDK_NGX_PerfQuality_Value_Balanced;
@@ -196,6 +205,26 @@ void DLSSModule::setAttributes(int attributeCount, std::vector<std::string> &att
                 mode_ = NVSDK_NGX_PerfQuality_Value_MaxQuality;
             } else if (attributeKVs[2 * i + 1] == "render_pipeline.module.dlss.attribute.mode.dlaa") {
                 mode_ = NVSDK_NGX_PerfQuality_Value_DLAA;
+            }
+        } else if (attributeKVs[2 * i] == "render_pipeline.module.dlss.attribute.frame_generation") {
+            const auto &val = attributeKVs[2 * i + 1];
+            frameGenDynamic_ = false;
+            if (val == "render_pipeline.module.dlss.attribute.frame_generation.off") {
+                frameGenMultiFrameCount_ = 0;
+            } else if (val == "render_pipeline.module.dlss.attribute.frame_generation.x2") {
+                frameGenMultiFrameCount_ = 1;
+            } else if (val == "render_pipeline.module.dlss.attribute.frame_generation.x3") {
+                frameGenMultiFrameCount_ = 2;
+            } else if (val == "render_pipeline.module.dlss.attribute.frame_generation.x4") {
+                frameGenMultiFrameCount_ = 3;
+            } else if (val == "render_pipeline.module.dlss.attribute.frame_generation.x5") {
+                frameGenMultiFrameCount_ = 4;
+            } else if (val == "render_pipeline.module.dlss.attribute.frame_generation.x6") {
+                frameGenMultiFrameCount_ = 5;
+            } else if (val == "render_pipeline.module.dlss.attribute.frame_generation.dynamic") {
+                frameGenDynamic_ = true;
+                // Sentinel value: will be resolved to hardware max in build()
+                frameGenMultiFrameCount_ = UINT32_MAX;
             }
         }
     }
@@ -214,6 +243,48 @@ void DLSSModule::build() {
     dlssRRInitInfo.quality = mode_;
     ngxContext_->initDlssRR(dlssRRInitInfo, framework->mainCommandPool(), dlss_);
 
+    // Initialize Frame Generation if enabled and available
+    if (frameGenMultiFrameCount_ > 0 && ngxContext_->queryFrameGenAvailable() == NVSDK_NGX_Result_Success) {
+        // Clamp requested count to hardware max (also resolves dynamic/sentinel mode)
+        uint32_t maxCount = ngxContext_->queryMaxMultiFrameCount();
+        frameGenMaxMultiFrameCount_ = maxCount;
+        if (frameGenDynamic_ || frameGenMultiFrameCount_ >= UINT32_MAX) {
+            // Dynamic mode: allocate to hardware max, actual count adjusted per-frame
+            frameGenMultiFrameCount_ = maxCount;
+            std::cout << "[DLSS] Dynamic Frame Generation: hardware max " << maxCount
+                      << " (" << (maxCount + 1) << "x)" << std::endl;
+        } else if (frameGenMultiFrameCount_ > maxCount) {
+            std::cout << "[DLSS] Requested multi-frame count " << frameGenMultiFrameCount_
+                      << " exceeds hardware max " << maxCount << ", clamping" << std::endl;
+            frameGenMultiFrameCount_ = maxCount;
+        }
+
+        dlssFG_ = DlssFG::create();
+        NgxContext::DlssFGInitInfo fgInitInfo{};
+        fgInitInfo.width = outputWidth_;
+        fgInitInfo.height = outputHeight_;
+        fgInitInfo.backbufferFormat = framework->swapchain()->vkSurfaceFormat().format;
+        if (ngxContext_->initFrameGen(fgInitInfo, framework->mainCommandPool(), dlssFG_) != NVSDK_NGX_Result_Success) {
+            std::cerr << "[DLSS] Frame Generation initialization failed" << std::endl;
+            dlssFG_ = nullptr;
+            frameGenMultiFrameCount_ = 0;
+        } else {
+            // Create interpolated frame images: one per multi-frame index per swapchain image
+            for (uint32_t i = 0; i < size; i++) {
+                interpFrameImages_[i].resize(frameGenMultiFrameCount_);
+                for (uint32_t j = 0; j < frameGenMultiFrameCount_; j++) {
+                    interpFrameImages_[i][j] = vk::DeviceLocalImage::create(
+                        framework->device(), framework->vma(), false, outputWidth_, outputHeight_, 1,
+                        framework->swapchain()->vkSurfaceFormat().format,
+                        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                            VK_IMAGE_USAGE_SAMPLED_BIT);
+                }
+            }
+            std::cout << "[DLSS] Frame Generation initialized (multi-frame count: " << frameGenMultiFrameCount_
+                      << ", multiplier: " << (frameGenMultiFrameCount_ + 1) << "x)" << std::endl;
+        }
+    }
+
     contexts_.resize(size);
 
     for (int i = 0; i < size; i++) {
@@ -226,11 +297,23 @@ std::vector<std::shared_ptr<WorldModuleContext>> &DLSSModule::contexts() {
     return contexts_;
 }
 
+void DLSSModule::updateDynamicFrameCount(double frameTimeSec, int targetFps) {
+    if (!frameGenDynamic_ || frameGenMaxMultiFrameCount_ == 0) return;
+
+    double baseFps = 1.0 / frameTimeSec;
+    // Total frames needed to hit target = ceil(targetFps / baseFps)
+    // Interp frames = total - 1 (the real frame counts as one)
+    uint32_t totalNeeded = static_cast<uint32_t>(std::ceil(static_cast<double>(targetFps) / baseFps));
+    uint32_t interpNeeded = (totalNeeded > 1) ? (totalNeeded - 1) : 1;
+    frameGenMultiFrameCount_ = std::min(interpNeeded, frameGenMaxMultiFrameCount_);
+}
+
 void DLSSModule::bindTexture(std::shared_ptr<vk::Sampler> sampler,
                              std::shared_ptr<vk::DeviceLocalImage> image,
                              int index) {}
 
 void DLSSModule::preClose() {
+    if (dlssFG_) { dlssFG_->deinit(); dlssFG_ = nullptr; }
     dlss_->deinit();
 }
 
