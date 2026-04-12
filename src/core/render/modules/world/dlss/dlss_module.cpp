@@ -215,6 +215,13 @@ void DLSSModule::setAttributes(int attributeCount, std::vector<std::string> &att
                 frameGenMultiFrameCount_ = 2;
             } else if (val == "render_pipeline.module.dlss.attribute.frame_generation.x4") {
                 frameGenMultiFrameCount_ = 3;
+            } else if (val == "render_pipeline.module.dlss.attribute.frame_generation.x5") {
+                frameGenMultiFrameCount_ = 4;
+            } else if (val == "render_pipeline.module.dlss.attribute.frame_generation.x6") {
+                frameGenMultiFrameCount_ = 5;
+            } else if (val == "render_pipeline.module.dlss.attribute.frame_generation.auto") {
+                // Sentinel value: will be resolved to hardware max in build()
+                frameGenMultiFrameCount_ = UINT32_MAX;
             }
         }
     }
@@ -235,9 +242,14 @@ void DLSSModule::build() {
 
     // Initialize Frame Generation if enabled and available
     if (frameGenMultiFrameCount_ > 0 && ngxContext_->queryFrameGenAvailable() == NVSDK_NGX_Result_Success) {
-        // Clamp requested count to hardware max
+        // Clamp requested count to hardware max (also resolves auto mode)
         uint32_t maxCount = ngxContext_->queryMaxMultiFrameCount();
-        if (frameGenMultiFrameCount_ > maxCount) {
+        if (frameGenMultiFrameCount_ >= UINT32_MAX) {
+            // Auto mode: use hardware maximum
+            std::cout << "[DLSS] Auto Frame Generation: using hardware max " << maxCount
+                      << " (" << (maxCount + 1) << "x)" << std::endl;
+            frameGenMultiFrameCount_ = maxCount;
+        } else if (frameGenMultiFrameCount_ > maxCount) {
             std::cout << "[DLSS] Requested multi-frame count " << frameGenMultiFrameCount_
                       << " exceeds hardware max " << maxCount << ", clamping" << std::endl;
             frameGenMultiFrameCount_ = maxCount;
