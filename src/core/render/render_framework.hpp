@@ -10,6 +10,7 @@
 
 #include <map>
 #include <mutex>
+#include <chrono>
 
 class Framework;
 class UIModule;
@@ -146,6 +147,11 @@ class Framework : public SharedObject<Framework> {
     glm::mat4 prevViewMatrix_ = glm::mat4(1.0f);
     glm::mat4 prevProjMatrix_ = glm::mat4(1.0f);
     bool hasPrevMatrices_ = false;
+
+    // Dynamic FG state
+    int monitorRefreshRate_ = 0;
+    std::chrono::high_resolution_clock::time_point lastBaseFrameTime_{};
+    bool hasLastBaseFrameTime_ = false;
 
     // FG pipelined-present resources
     std::vector<std::shared_ptr<vk::CommandBuffer>> interpBlitCommandBuffers_;

@@ -167,6 +167,20 @@ void FrameworkContext::evaluateFrameGeneration() {
     auto dlssFG = dlssModule->dlssFG();
     auto depthImage = dlssModule->linearDepthImage(frameIndex);
     auto mvecsImage = dlssModule->motionVectorImage(frameIndex);
+
+    // Update dynamic frame count based on measured frame time
+    if (dlssModule->isFrameGenDynamic()) {
+        auto now = std::chrono::high_resolution_clock::now();
+        if (f->hasLastBaseFrameTime_) {
+            double frameTimeSec = std::chrono::duration<double>(now - f->lastBaseFrameTime_).count();
+            if (frameTimeSec > 0.0) {
+                dlssModule->updateDynamicFrameCount(frameTimeSec, f->monitorRefreshRate_);
+            }
+        }
+        f->lastBaseFrameTime_ = now;
+        f->hasLastBaseFrameTime_ = true;
+    }
+
     uint32_t multiFrameCount = dlssModule->frameGenMultiFrameCount();
 
     if (!dlssFG || !depthImage || !mvecsImage || multiFrameCount == 0) {
@@ -362,6 +376,15 @@ void Framework::init(GLFWwindow *window) {
         interpProcessedSemaphores_.push_back(vk::Semaphore::create(device_));
         interpBlitFences_.push_back(vk::Fence::create(device_, true));
     }
+
+    // Query monitor refresh rate for dynamic FG
+    GLFWmonitor *monitor = GLFW_GetPrimaryMonitor();
+    if (monitor) {
+        const GLFWvidmode *mode = GLFW_GetVideoMode(monitor);
+        if (mode) monitorRefreshRate_ = mode->refreshRate;
+    }
+    if (monitorRefreshRate_ <= 0) monitorRefreshRate_ = 60;
+    std::cout << "[Framework] Monitor refresh rate: " << monitorRefreshRate_ << " Hz" << std::endl;
 
     pipeline_ = Pipeline::create(shared_from_this());
 }

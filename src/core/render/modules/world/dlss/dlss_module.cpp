@@ -1,5 +1,6 @@
 #include "core/render/modules/world/dlss/dlss_module.hpp"
 
+#include <cmath>
 #include "core/render/buffers.hpp"
 #include "core/render/pipeline.hpp"
 #include "core/render/render_framework.hpp"
@@ -207,6 +208,7 @@ void DLSSModule::setAttributes(int attributeCount, std::vector<std::string> &att
             }
         } else if (attributeKVs[2 * i] == "render_pipeline.module.dlss.attribute.frame_generation") {
             const auto &val = attributeKVs[2 * i + 1];
+            frameGenDynamic_ = false;
             if (val == "render_pipeline.module.dlss.attribute.frame_generation.off") {
                 frameGenMultiFrameCount_ = 0;
             } else if (val == "render_pipeline.module.dlss.attribute.frame_generation.x2") {
@@ -219,7 +221,8 @@ void DLSSModule::setAttributes(int attributeCount, std::vector<std::string> &att
                 frameGenMultiFrameCount_ = 4;
             } else if (val == "render_pipeline.module.dlss.attribute.frame_generation.x6") {
                 frameGenMultiFrameCount_ = 5;
-            } else if (val == "render_pipeline.module.dlss.attribute.frame_generation.auto") {
+            } else if (val == "render_pipeline.module.dlss.attribute.frame_generation.dynamic") {
+                frameGenDynamic_ = true;
                 // Sentinel value: will be resolved to hardware max in build()
                 frameGenMultiFrameCount_ = UINT32_MAX;
             }
@@ -242,13 +245,14 @@ void DLSSModule::build() {
 
     // Initialize Frame Generation if enabled and available
     if (frameGenMultiFrameCount_ > 0 && ngxContext_->queryFrameGenAvailable() == NVSDK_NGX_Result_Success) {
-        // Clamp requested count to hardware max (also resolves auto mode)
+        // Clamp requested count to hardware max (also resolves dynamic/sentinel mode)
         uint32_t maxCount = ngxContext_->queryMaxMultiFrameCount();
-        if (frameGenMultiFrameCount_ >= UINT32_MAX) {
-            // Auto mode: use hardware maximum
-            std::cout << "[DLSS] Auto Frame Generation: using hardware max " << maxCount
-                      << " (" << (maxCount + 1) << "x)" << std::endl;
+        frameGenMaxMultiFrameCount_ = maxCount;
+        if (frameGenDynamic_ || frameGenMultiFrameCount_ >= UINT32_MAX) {
+            // Dynamic mode: allocate to hardware max, actual count adjusted per-frame
             frameGenMultiFrameCount_ = maxCount;
+            std::cout << "[DLSS] Dynamic Frame Generation: hardware max " << maxCount
+                      << " (" << (maxCount + 1) << "x)" << std::endl;
         } else if (frameGenMultiFrameCount_ > maxCount) {
             std::cout << "[DLSS] Requested multi-frame count " << frameGenMultiFrameCount_
                       << " exceeds hardware max " << maxCount << ", clamping" << std::endl;
@@ -291,6 +295,17 @@ void DLSSModule::build() {
 
 std::vector<std::shared_ptr<WorldModuleContext>> &DLSSModule::contexts() {
     return contexts_;
+}
+
+void DLSSModule::updateDynamicFrameCount(double frameTimeSec, int targetFps) {
+    if (!frameGenDynamic_ || frameGenMaxMultiFrameCount_ == 0) return;
+
+    double baseFps = 1.0 / frameTimeSec;
+    // Total frames needed to hit target = ceil(targetFps / baseFps)
+    // Interp frames = total - 1 (the real frame counts as one)
+    uint32_t totalNeeded = static_cast<uint32_t>(std::ceil(static_cast<double>(targetFps) / baseFps));
+    uint32_t interpNeeded = (totalNeeded > 1) ? (totalNeeded - 1) : 1;
+    frameGenMultiFrameCount_ = std::min(interpNeeded, frameGenMaxMultiFrameCount_);
 }
 
 void DLSSModule::bindTexture(std::shared_ptr<vk::Sampler> sampler,

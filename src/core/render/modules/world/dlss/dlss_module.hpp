@@ -53,6 +53,8 @@ class DLSSModule : public WorldModule, public SharedObject<DLSSModule> {
 
     bool isFrameGenEnabled() const { return frameGenMultiFrameCount_ > 0 && dlssFG_ != nullptr; }
     uint32_t frameGenMultiFrameCount() const { return frameGenMultiFrameCount_; }
+    bool isFrameGenDynamic() const { return frameGenDynamic_; }
+    void updateDynamicFrameCount(double frameTimeSec, int targetFps);
     std::shared_ptr<DlssFG> dlssFG() { return dlssFG_; }
     std::shared_ptr<vk::DeviceLocalImage> interpFrameImage(uint32_t frameIndex, uint32_t interpIndex) { return interpFrameImages_[frameIndex][interpIndex]; }
     std::shared_ptr<vk::DeviceLocalImage> motionVectorImage(uint32_t frameIndex) { return motionVectorImages_[frameIndex]; }
@@ -81,6 +83,8 @@ class DLSSModule : public WorldModule, public SharedObject<DLSSModule> {
     // frame generation
     // 0 = disabled, 1 = 2x, 2 = 3x, 3 = 4x, etc.
     uint32_t frameGenMultiFrameCount_ = 0;
+    uint32_t frameGenMaxMultiFrameCount_ = 0;
+    bool frameGenDynamic_ = false;
     std::shared_ptr<DlssFG> dlssFG_;
     // interpFrameImages_[swapchainIndex][interpIndex] — one per interpolated frame
     std::vector<std::vector<std::shared_ptr<vk::DeviceLocalImage>>> interpFrameImages_;
