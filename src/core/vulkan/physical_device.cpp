@@ -79,8 +79,6 @@ void vk::PhysicalDevice::findPhysicalDevice() {
             VkPhysicalDeviceProperties properties;
             vkGetPhysicalDeviceProperties(device, &properties);
 
-            if (properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) continue;
-
             physicalDevice_ = device;
 #ifdef DEBUG
             physicalDeviceCout() << "found suitable physical device" << std::endl;
