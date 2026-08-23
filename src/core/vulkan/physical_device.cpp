@@ -1,15 +1,14 @@
 #include "core/vulkan/physical_device.hpp"
-
 #include "core/vulkan/instance.hpp"
 #include "core/vulkan/window.hpp"
-
+#include <cstdlib>
 #include <iostream>
+#include <string>
 #include <vector>
 
 std::ostream &physicalDeviceCout() {
     return std::cout << "[PhysicalDevice] ";
 }
-
 std::ostream &physicalDeviceCerr() {
     return std::cerr << "[PhysicalDevice] ";
 }
@@ -20,37 +19,29 @@ bool isDeviceSuitable(VkPhysicalDevice device) {
     vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, nullptr);
     std::vector<VkExtensionProperties> availableExtensions(extensionCount);
     vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, availableExtensions.data());
-
     bool hasSwapchain = false;
     bool hasRayTracing = false;
-
     for (const auto &ext : availableExtensions) {
         if (std::string(ext.extensionName) == VK_KHR_SWAPCHAIN_EXTENSION_NAME) { hasSwapchain = true; }
         if (std::string(ext.extensionName) == VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME) { hasRayTracing = true; }
     }
-
     if (!hasSwapchain || !hasRayTracing) return false;
 
     // check features
     VkPhysicalDeviceVulkan12Features vulkan12Features{};
     vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-
     VkPhysicalDeviceVulkan13Features vulkan13Features{};
     vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     vulkan13Features.pNext = &vulkan12Features;
-
     VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureFeatures{};
     accelerationStructureFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
     accelerationStructureFeatures.pNext = &vulkan13Features;
-
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingFeatures = {};
     rayTracingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
     rayTracingFeatures.pNext = &accelerationStructureFeatures;
-
     VkPhysicalDeviceFeatures2 features2 = {};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features2.pNext = &rayTracingFeatures;
-
     vkGetPhysicalDeviceFeatures2(device, &features2);
     if (!rayTracingFeatures.rayTracingPipeline || !accelerationStructureFeatures.accelerationStructure ||
         !vulkan13Features.synchronization2 || !vulkan12Features.bufferDeviceAddress) {
@@ -73,26 +64,23 @@ void vk::PhysicalDevice::findPhysicalDevice() {
         exit(1);
     }
 
-// find the first supported physical device
-for (const auto &device : devices) {
-    if (isDeviceSuitable(device)) {
-        physicalDevice_ = device;
-#ifdef DEBUG
-        physicalDeviceCout() << "found suitable physical device" << std::endl;
-#endif
-        // fixed ^
+    // find the first supported physical device
+    for (const auto &device : devices) {
+        if (isDeviceSuitable(device)) {
+            physicalDevice_ = device;
 
-            // output device info
+            VkPhysicalDeviceProperties properties;
+            vkGetPhysicalDeviceProperties(device, &properties);
+
+#ifdef DEBUG
+            physicalDeviceCout() << "found suitable physical device" << std::endl;
             uint32_t supportedVersion[] = {VK_VERSION_MAJOR(properties.apiVersion),
                                            VK_VERSION_MINOR(properties.apiVersion),
                                            VK_VERSION_PATCH(properties.apiVersion)};
-
-#ifdef DEBUG
             physicalDeviceCout() << "selected device name: " << properties.deviceName << std::endl;
             physicalDeviceCout() << "supports Vulkan version: " << supportedVersion[0] << "." << supportedVersion[1]
                                  << "." << supportedVersion[2] << std::endl;
 #endif
-
             return;
         }
     }
@@ -106,19 +94,15 @@ vk::PhysicalDevice::PhysicalDevice(std::shared_ptr<Instance> instance, std::shar
     : instance_(instance), window_(window) {
     findPhysicalDevice();
     findQueueFamilies();
-
     VkPhysicalDeviceAccelerationStructurePropertiesKHR accelStructProperties{};
     accelStructProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
-
     VkPhysicalDeviceRayTracingPipelinePropertiesKHR rayTracingProperties{};
     rayTracingProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
     rayTracingProperties.pNext = &accelStructProperties;
-
     VkPhysicalDeviceProperties2 deviceProps2{};
     deviceProps2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
     deviceProps2.pNext = &rayTracingProperties;
     vkGetPhysicalDeviceProperties2(physicalDevice_, &deviceProps2);
-
     properties_ = deviceProps2.properties;
     rayTracingProperties_ = rayTracingProperties;
     accelerationStructProperties_ = accelStructProperties;
@@ -145,38 +129,30 @@ uint32_t vk::PhysicalDevice::secondaryQueueIndex() {
 void vk::PhysicalDevice::findQueueFamilies() {
     uint32_t queueFamilyCount = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice_, &queueFamilyCount, nullptr);
-
     if (queueFamilyCount == 0) {
         physicalDeviceCerr() << "Physical device has no queue families!" << std::endl;
         exit(EXIT_FAILURE);
     }
-
     std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice_, &queueFamilyCount, queueFamilies.data());
-
 #ifdef DEBUG
     physicalDeviceCout() << "physical device has " << queueFamilyCount << " queue families" << std::endl;
 #endif
-
     for (uint32_t i = 0; i < queueFamilyCount; i++) {
         VkBool32 presentSupport = false;
         vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice_, i, window_->vkSurface(), &presentSupport);
-
         VkBool32 graphicsSupport = false;
         if (queueFamilies[i].queueCount > 0 && (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
             graphicsSupport = true;
         }
-
         VkBool32 computeSupport = false;
         if (queueFamilies[i].queueCount > 0 && (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
             computeSupport = true;
         }
-
         VkBool32 transferSupport = false;
         if (queueFamilies[i].queueCount > 0 && (queueFamilies[i].queueFlags & VK_QUEUE_TRANSFER_BIT)) {
             transferSupport = true;
         }
-
         // Early exit if all needed queue families are found
         if (presentSupport && graphicsSupport && computeSupport && transferSupport) {
             mainQueueIndex_ = i;
@@ -185,38 +161,31 @@ void vk::PhysicalDevice::findQueueFamilies() {
             break;
         }
     }
-
     for (uint32_t i = 0; i < queueFamilyCount; i++) {
         VkBool32 presentSupport = false;
         vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice_, i, window_->vkSurface(), &presentSupport);
-
         VkBool32 graphicsSupport = false;
         if (queueFamilies[i].queueCount > 0 && (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
             graphicsSupport = true;
         }
-
         VkBool32 computeSupport = false;
         if (queueFamilies[i].queueCount > 0 && (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
             computeSupport = true;
         }
-
         VkBool32 transferSupport = false;
         if (queueFamilies[i].queueCount > 0 && (queueFamilies[i].queueFlags & VK_QUEUE_TRANSFER_BIT)) {
             transferSupport = true;
         }
-
         // Early exit if all needed queue families are found
         if (computeSupport && transferSupport && i != mainQueueIndex_) {
             secondaryQueueIndex_ = i;
             break;
         }
     }
-
     if (mainQueueIndex_ == -1) {
         physicalDeviceCerr() << "No queue family that supports graphics, compute and transfer found." << std::endl;
         exit(EXIT_FAILURE);
     }
-
     if (secondaryQueueIndex_ == -1) {
         physicalDeviceCerr() << "No queue family that supports graphics, compute and transfer found." << std::endl;
         exit(EXIT_FAILURE);
