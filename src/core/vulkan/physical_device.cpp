@@ -73,18 +73,14 @@ void vk::PhysicalDevice::findPhysicalDevice() {
         exit(1);
     }
 
-    // find the first supported physical device
-    for (const auto &device : devices) {
-        if (isDeviceSuitable(device)) {
-            VkPhysicalDeviceProperties properties;
-            vkGetPhysicalDeviceProperties(device, &properties);
-
-            if (properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) continue;
-
-            physicalDevice_ = device;
+// find the first supported physical device
+for (const auto &device : devices) {
+    if (isDeviceSuitable(device)) {
+        physicalDevice_ = device;
 #ifdef DEBUG
-            physicalDeviceCout() << "found suitable physical device" << std::endl;
+        physicalDeviceCout() << "found suitable physical device" << std::endl;
 #endif
+        // fixed ^
 
             // output device info
             uint32_t supportedVersion[] = {VK_VERSION_MAJOR(properties.apiVersion),
