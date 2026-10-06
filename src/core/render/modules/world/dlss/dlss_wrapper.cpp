@@ -465,6 +465,7 @@ NVSDK_NGX_Result DlssRR::init(std::shared_ptr<vk::Device> device,
     const uint32_t creationNodeMask = 0x1;
     const uint32_t visibilityNodeMask = 0x1;
 
+    m_ngxParams->Set(NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_DLAA, info.preset);
     m_ngxParams->Set(NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Quality, info.preset);
     m_ngxParams->Set(NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraQuality, info.preset);
     m_ngxParams->Set(NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Balanced, info.preset);
