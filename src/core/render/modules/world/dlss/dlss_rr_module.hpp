@@ -63,6 +63,7 @@ class DlssRRModule : public WorldModule, public SharedObject<DlssRRModule> {
     std::shared_ptr<DlssRR> dlss_;
     NgxContext::SupportedSizes supportedSizes_{};
     NVSDK_NGX_PerfQuality_Value mode_ = NVSDK_NGX_PerfQuality_Value_Balanced;
+    NVSDK_NGX_RayReconstruction_Hint_Render_Preset preset_ = NVSDK_NGX_RayReconstruction_Hint_Render_Preset_E;
 
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> processedImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> upscaledFirstHitDepthImages_;

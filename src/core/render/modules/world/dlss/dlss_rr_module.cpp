@@ -209,6 +209,14 @@ void DlssRRModule::setAttributes(int attributeCount, std::vector<std::string> &a
             } else if (value == "render_pipeline.module.dlss_rr.attribute.mode.dlaa") {
                 mode_ = NVSDK_NGX_PerfQuality_Value_DLAA;
             }
+        } else if (key == "render_pipeline.module.dlss_rr.attribute.model_preset") {
+            if (value == "render_pipeline.module.dlss_rr.attribute.model_preset.d") {
+                preset_ = NVSDK_NGX_RayReconstruction_Hint_Render_Preset_D;
+            } else if (value == "render_pipeline.module.dlss_rr.attribute.model_preset.e") {
+                preset_ = NVSDK_NGX_RayReconstruction_Hint_Render_Preset_E;
+            } else if (value == "render_pipeline.module.dlss_rr.attribute.model_preset.f") {
+                preset_ = NVSDK_NGX_RayReconstruction_Hint_Render_Preset_F;
+            }
         }
     }
 }
@@ -222,6 +230,7 @@ void DlssRRModule::build() {
     dlssRRInitInfo.inputSize = {inputWidth_, inputHeight_};
     dlssRRInitInfo.outputSize = {outputWidth_, outputHeight_};
     dlssRRInitInfo.quality = mode_;
+    dlssRRInitInfo.preset = preset_;
     ngxContext_->initDlssRR(dlssRRInitInfo, framework->mainCommandPool(), dlss_);
 
     auto firstHitDepthShader =
