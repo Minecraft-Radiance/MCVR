@@ -860,8 +860,8 @@ void main() {
 
     imageStore(firstHitDepthImage, pixel, vec4(selectedFirstHit.firstHitLinearDepth));
 
-    dvec3 currCameraPos = worldUBO.cameraPos.xyz;
-    dvec3 lastCameraPos = lastWorldUBO.cameraPos.xyz;
+    vec3 currCameraPos = worldUBO.cameraPos.xyz;
+    vec3 lastCameraPos = lastWorldUBO.cameraPos.xyz;
     vec3 cameraDelta = vec3(currCameraPos - lastCameraPos);
     mat4 prevRelativeMVP = lastWorldUBO.cameraProjMat * lastWorldUBO.cameraEffectedViewMat;
 

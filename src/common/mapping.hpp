@@ -14,7 +14,6 @@
 #    define T_BOOL bool
 #    define T_DVEC4 glm::dvec4
 #else
-#    extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 #    define T_VEC2 vec2
 #    define T_IVEC2 ivec2
 #    define T_VEC3 vec3
