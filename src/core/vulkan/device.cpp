@@ -115,6 +115,9 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     supportedExtensions.reserve(deviceExtensions.size());
     for (const auto &ext : deviceExtensions) { supportedExtensions.insert(ext.extensionName); }
 
+    if (supportedExtensions.contains("VK_KHR_portability_subset")) {
+        enabledExtensions.push_back("VK_KHR_portability_subset");
+    }
     if (supportedExtensions.find(VK_AMD_DEVICE_COHERENT_MEMORY_EXTENSION_NAME) != supportedExtensions.end()) {
         enabledExtensions.push_back(VK_AMD_DEVICE_COHERENT_MEMORY_EXTENSION_NAME);
     }

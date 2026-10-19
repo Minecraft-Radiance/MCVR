@@ -329,7 +329,9 @@ std::shared_ptr<vk::RayTracingPipeline> vk::RayTracingPipelineBuilder::build(std
     pipelineInfo.pGroups = shaderGroupBuilder_.shaderGroupCreateInfos.data();
     pipelineInfo.layout = pipelineLayout_;
     pipelineInfo.maxPipelineRayRecursionDepth = maxRayRecursionDepth_;
+#ifndef __APPLE__
     pipelineInfo.flags = VK_PIPELINE_CREATE_RAY_TRACING_SKIP_AABBS_BIT_KHR;
+#endif
 
     VkPipeline rayTracingPipeline;
     if (vkCreateRayTracingPipelinesKHR(device->vkDevice(), VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr,

@@ -168,9 +168,11 @@ void vk::PhysicalDevice::evaluateRequiredFeatures(vk::PhysicalDevice::PhysicalDe
     if (rayTracingFeatures.rayTracingPipelineTraceRaysIndirect != VK_TRUE) {
         candidate.rejectionReasons.emplace_back("missing feature rayTracingPipelineTraceRaysIndirect");
     }
+#ifndef __APPLE__
     if (rayTracingFeatures.rayTraversalPrimitiveCulling != VK_TRUE) {
         candidate.rejectionReasons.emplace_back("missing feature rayTraversalPrimitiveCulling");
     }
+#endif // macOS ships the triangle-only vanilla-pt pack without skip-AABB flags.
     if (accelerationStructureFeatures.accelerationStructure != VK_TRUE) {
         candidate.rejectionReasons.emplace_back("missing feature accelerationStructure");
     }

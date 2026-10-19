@@ -12,7 +12,12 @@
 #include <cmath>
 #include <iostream>
 
-FSRUpscalerModule::FSRUpscalerModule() {}
+FSRUpscalerModule::FSRUpscalerModule() {
+#ifndef MCVR_ENABLE_FFX_UPSCALER
+    fsr3Enabled_ = false;
+    qualityMode_ = QualityMode::NativeAA;
+#endif
+}
 
 bool FSRUpscalerModule::isHdrUpscaleFormat(VkFormat format) {
     switch (format) {
@@ -361,6 +366,13 @@ void FSRUpscalerModule::setAttributes(int attributeCount, std::vector<std::strin
             preExposure_ = std::stof(value);
         }
     }
+#ifndef MCVR_ENABLE_FFX_UPSCALER
+    // Keep the existing native-resolution blit path when FFX is not compiled.
+    fsr3Enabled_ = false;
+    qualityMode_ = QualityMode::NativeAA;
+    renderWidth_ = displayWidth_;
+    renderHeight_ = displayHeight_;
+#endif
 }
 
 std::vector<std::shared_ptr<WorldModuleContext>> &FSRUpscalerModule::contexts() {

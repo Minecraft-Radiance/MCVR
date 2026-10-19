@@ -63,7 +63,12 @@ set_target_properties(tinyexpr PROPERTIES POSITION_INDEPENDENT_CODE ON)
 set(TINYEXPR_INCLUDE_DIR ${PROJECT_SOURCE_DIR}/extern/tinyexpr)
 
 # DLSS
-add_subdirectory(extern/DLSS EXCLUDE_FROM_ALL)
+if(APPLE)
+    add_library(ngx INTERFACE)
+    target_include_directories(ngx INTERFACE "${PROJECT_SOURCE_DIR}/extern/DLSS/include")
+else()
+    add_subdirectory(extern/DLSS EXCLUDE_FROM_ALL)
+endif()
 
 # JNI
 find_package(JNI REQUIRED)
@@ -108,6 +113,10 @@ if(MCVR_ENABLE_CPU_PROFILE_FLAGS)
 endif()
 
 set(MCVR_BUILT_IN_SHADER_PACKS vanilla-pt advanced)
+if(APPLE)
+    # The advanced pack requires primitive-culling features MageVK does not expose.
+    set(MCVR_BUILT_IN_SHADER_PACKS vanilla-pt)
+endif()
 message(STATUS "Built-in shader packs: ${MCVR_BUILT_IN_SHADER_PACKS}")
 
 option(MCVR_ENABLE_FFX_UPSCALER "Enable FidelityFX Upscaler support" ON)
