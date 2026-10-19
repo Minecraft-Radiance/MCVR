@@ -1,0 +1,26 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#define FFX_GPU 1
+#define FFX_GLSL 1
+#define FFX_HALF 0
+#define FFX_FSR_EASU_FLOAT 1
+#include "ffx_core.h"
+#include "fsr1/ffx_fsr1.h"
+#include "fsr1_common.glsl"
+layout(local_size_x=16,local_size_y=16) in;
+layout(set=0,binding=0) uniform sampler2D inputColor;
+layout(set=0,binding=1,rgba32f) uniform writeonly image2D easuOutput;
+vec4 FsrEasuRF(vec2 p) { return fsr1Encode(textureGather(inputColor,p,0)); }
+vec4 FsrEasuGF(vec2 p) { return fsr1Encode(textureGather(inputColor,p,1)); }
+vec4 FsrEasuBF(vec2 p) { return fsr1Encode(textureGather(inputColor,p,2)); }
+void main() {
+    uvec2 pixel=gl_GlobalInvocationID.xy;
+    ivec2 outputSize=imageSize(easuOutput);
+    if(any(greaterThanEqual(pixel,uvec2(outputSize))))return;
+    vec2 inputSize=vec2(textureSize(inputColor,0));
+    uvec4 c0,c1,c2,c3;
+    ffxFsrPopulateEasuConstants(c0,c1,c2,c3,inputSize.x,inputSize.y,inputSize.x,inputSize.y,float(outputSize.x),float(outputSize.y));
+    vec3 color;
+    ffxFsrEasuFloat(color,pixel,c0,c1,c2,c3);
+    imageStore(easuOutput,ivec2(pixel),vec4(clamp(color,vec3(0),vec3(1)),1));
+}

@@ -33,6 +33,9 @@ class Device : public SharedObject<Device> {
     std::recursive_mutex &asyncComputeQueueMutex();
 
     bool hasExtendedDynamicState2LogicOp() const;
+    bool hasDynamicColorBlendState() const;
+    bool hasAccelerationStructureUpdateAfterBind() const;
+    uint32_t textureDescriptorCapacity() const;
     bool hasMultiDrawIndirect() const;
     bool hasDrawIndirectFirstInstance() const;
     bool hasShaderInvocationReorderEXT() const;
@@ -63,6 +66,10 @@ class Device : public SharedObject<Device> {
     std::recursive_mutex asyncComputeQueueMutex_;
 
     bool extendedDynamicState2LogicOp_ = false;
+    bool dynamicColorBlendState_ = false;
+    bool accelerationStructureUpdateAfterBind_ = false;
+    uint32_t textureDescriptorCapacity_ = 4096;
+    void initTextureDescriptorCapacity();
     bool multiDrawIndirect_ = false;
     bool drawIndirectFirstInstance_ = false;
     bool shaderInvocationReorderEXT_ = false;

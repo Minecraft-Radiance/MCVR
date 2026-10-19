@@ -90,3 +90,7 @@ cmake-build*
 *.markdown
 !docs/advanced_shader_architecture.md
 !docs/aeroforge_1080p_performance.md
+
+# macOS port build outputs
+.DS_Store
+._*

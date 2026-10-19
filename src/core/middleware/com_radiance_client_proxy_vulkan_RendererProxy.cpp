@@ -1,5 +1,6 @@
 #include "com_radiance_client_proxy_vulkan_RendererProxy.h"
 #include "core/middleware/jni_export.hpp"
+#include "core/middleware/jni_exceptions.hpp"
 
 #include "core/all_extern.hpp"
 #include "core/profiler/profiler.hpp"
@@ -253,25 +254,31 @@ JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_maxSu
     return maxImageSize;
 }
 
-JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_acquireContext(JNIEnv *, jclass) {
+JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_acquireContext(JNIEnv *env, jclass) {
     MCVR_PROFILE_SCOPE("jni.RendererProxy.acquireContext");
-    auto framework = Renderer::instance().framework();
-    if (framework == nullptr) return;
-    framework->acquireContext();
+    mcvr::jni::invoke(env, "acquireContext", [&] {
+        auto framework = Renderer::instance().framework();
+        if (framework == nullptr) return;
+        framework->acquireContext();
+    });
 }
 
-JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_submitCommand(JNIEnv *, jclass) {
+JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_submitCommand(JNIEnv *env, jclass) {
     MCVR_PROFILE_SCOPE("jni.RendererProxy.submitCommand");
-    auto framework = Renderer::instance().framework();
-    if (framework == nullptr) return;
-    framework->submitCommand();
+    mcvr::jni::invoke(env, "submitCommand", [&] {
+        auto framework = Renderer::instance().framework();
+        if (framework == nullptr) return;
+        framework->submitCommand();
+    });
 }
 
-JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_present(JNIEnv *, jclass) {
+JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_present(JNIEnv *env, jclass) {
     MCVR_PROFILE_SCOPE("jni.RendererProxy.present");
-    auto framework = Renderer::instance().framework();
-    if (framework == nullptr) return;
-    framework->present();
+    mcvr::jni::invoke(env, "present", [&] {
+        auto framework = Renderer::instance().framework();
+        if (framework == nullptr) return;
+        framework->present();
+    });
 }
 
 extern "C" JNIEXPORT jint JNICALL
@@ -282,11 +289,13 @@ Java_com_radiance_client_proxy_vulkan_RendererProxy_getPresentedFrameRate(JNIEnv
     return framework == nullptr ? 0 : static_cast<jint>(framework->presentedFrameRate());
 }
 
-JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_close(JNIEnv *, jclass) {
+JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_close(JNIEnv *env, jclass) {
     MCVR_PROFILE_SCOPE("jni.RendererProxy.close");
-    auto framework = Renderer::instance().framework();
-    if (framework == nullptr) return;
-    Renderer::instance().close();
+    mcvr::jni::invoke(env, "close", [&] {
+        auto framework = Renderer::instance().framework();
+        if (framework == nullptr) return;
+        Renderer::instance().close();
+    });
 }
 
 JNIEXPORT void JNICALL

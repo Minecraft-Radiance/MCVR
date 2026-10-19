@@ -120,6 +120,7 @@ endif()
 message(STATUS "Built-in shader packs: ${MCVR_BUILT_IN_SHADER_PACKS}")
 
 option(MCVR_ENABLE_FFX_UPSCALER "Enable FidelityFX Upscaler support" ON)
+option(MCVR_ENABLE_FSR1_SPATIAL "Enable standalone FidelityFX FSR1 spatial shaders" OFF)
 if(MCVR_ENABLE_FFX_UPSCALER)
     message(STATUS "FidelityFX Upscaler Enabled")
 

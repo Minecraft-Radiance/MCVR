@@ -726,16 +726,6 @@
       "sampled_binding": 2
     },
     {
-      "name": "material_state",
-      "type": "intermediate",
-      "dimension": "2d_array",
-      "format": "R16G16B16A16_SFLOAT",
-      "width": "RENDER_WIDTH",
-      "height": "RENDER_HEIGHT",
-      "depth": 3,
-      "storage_binding": 3
-    },
-    {
       "name": "post_motion",
       "type": "intermediate",
       "format": "R16G16B16A16_SFLOAT",
@@ -1052,12 +1042,11 @@
           "out:first_hit_refraction",
           "out:first_hit_base_emission",
           "out:fog_image",
-          "post_star_cloud_transmittance",
-          "material_state"
+          "post_star_cloud_transmittance"
         ]
       },
       "definitions": {
-        "VPT_MATERIAL_STATE_BINDING": "3"
+        "MCVR_RAY_MATERIAL_PAYLOAD": "1"
       },
       "rgen": "world/world.rgen",
       "default_hit_group": "default",

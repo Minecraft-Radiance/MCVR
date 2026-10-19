@@ -24,6 +24,13 @@ struct MainRay {
 
     T_VEC3 directLightRadiance;
     T_UINT pad0;
+
+#if defined(MCVR_RAY_MATERIAL_PAYLOAD) && MCVR_RAY_MATERIAL_PAYLOAD
+    // Keep each ray's material with its payload across visible function calls.
+    T_VEC4 materialAlbedo;
+    T_VEC4 materialF0Roughness;
+    T_VEC4 materialProperties;
+#endif
 };
 
 struct MaterialInfo {

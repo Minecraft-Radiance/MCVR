@@ -9,6 +9,8 @@
 #include <cstring>
 #include <glm/gtc/type_ptr.hpp>
 #include <limits>
+#include <cstdio>
+#include <cstdlib>
 
 namespace {
 constexpr float NRD_DENOISING_RANGE = 58953.0f;
@@ -1238,10 +1240,12 @@ void NrdModuleContext::render() {
 
     const auto renderTimestamp = std::chrono::steady_clock::now();
     float frameDeltaMilliseconds = 0.0f;
+    float rawFrameDeltaMilliseconds = 0.0f;
     if (module->hasLastRenderTimestamp_) {
         const float frameDeltaSeconds =
             std::chrono::duration<float>(renderTimestamp - module->lastRenderTimestamp_).count();
         if (std::isfinite(frameDeltaSeconds) && frameDeltaSeconds > 0.0f) {
+            rawFrameDeltaMilliseconds = frameDeltaSeconds * 1000.0f;
             const float boundedDeltaSeconds = std::clamp(frameDeltaSeconds, 1.0f / 240.0f, 1.0f / 5.0f);
             frameDeltaMilliseconds = boundedDeltaSeconds * 1000.0f;
         }
@@ -1249,6 +1253,21 @@ void NrdModuleContext::render() {
     module->lastRenderTimestamp_ = renderTimestamp;
     module->hasLastRenderTimestamp_ = true;
     module->updateFrameTime(frameDeltaMilliseconds, module->nrdFrameIndex_ <= 1);
+    const char *capture = std::getenv("MCVR_PERFORMANCE_CAPTURE");
+    if (capture != nullptr && std::strcmp(capture, "1") == 0) {
+        static std::chrono::steady_clock::time_point lastReport{};
+        if (renderTimestamp - lastReport >= std::chrono::seconds(5)) {
+            const auto &reblur = module->effectiveReblurSettings_;
+            const auto &relax = module->effectiveRelaxSettings_;
+            std::fprintf(stderr, "[RADIANCE-E15-NRD] frame=%u historyValid=%u raw_frame_ms=%.3f adaptive_fps=%.2f indirect=%ux%u direct=%ux%u reblur_history=%u fast=%u fix=%u relax_diffuse=%u specular=%u separate_direct=%u\n",
+                module->nrdFrameIndex_, unsigned(buffers->hasWorldHistory()), rawFrameDeltaMilliseconds,
+                module->smoothedFramesPerSecond_, module->indirectWidth_, module->indirectHeight_,
+                module->width_, module->height_, reblur.maxAccumulatedFrameNum, reblur.maxFastAccumulatedFrameNum,
+                reblur.historyFixFrameNum, relax.diffuseMaxAccumulatedFrameNum, relax.specularMaxAccumulatedFrameNum,
+                unsigned(module->isSeparateDirectDenoisingEnabled_));
+            lastReport = renderTimestamp;
+        }
+    }
 
     glm::mat4 nrdViewToClip = worldUBO->cameraProjMat;
     glm::mat4 nrdViewToClipPrev = lastWorldUBO->cameraProjMat;

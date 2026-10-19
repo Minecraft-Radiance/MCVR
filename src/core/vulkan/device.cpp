@@ -351,6 +351,12 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
             supportedExtendedDynamicState3.extendedDynamicState3LogicOpEnable;
     }
 
+    // Keep the three attachment states together: unsupported devices bake all
+    // of them into cached graphics pipeline variants instead of issuing setters.
+    dynamicColorBlendState_ = extendedDynamicState3.extendedDynamicState3ColorBlendEnable &&
+                             extendedDynamicState3.extendedDynamicState3ColorBlendEquation &&
+                             extendedDynamicState3.extendedDynamicState3ColorWriteMask;
+
     VkPhysicalDeviceExtendedDynamicState2FeaturesEXT extendedDynamicState2{};
     extendedDynamicState2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT;
     extendedDynamicState2.pNext = &extendedDynamicState3;
@@ -418,6 +424,8 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
         accelerationStructureFeatures.descriptorBindingAccelerationStructureUpdateAfterBind =
             supportedAccelerationStructureFeatures.descriptorBindingAccelerationStructureUpdateAfterBind;
     }
+    accelerationStructureUpdateAfterBind_ =
+        accelerationStructureFeatures.descriptorBindingAccelerationStructureUpdateAfterBind == VK_TRUE;
 
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingFeatures = {};
     rayTracingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
@@ -532,6 +540,10 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
                        "vkCreateDevice");
 
     volkLoadDevice(device_);
+    initTextureDescriptorCapacity();
+    deviceCerr() << "[RADIANCE-E15] colorState=" << (dynamicColorBlendState_ ? "dynamic" : "static-pipelines")
+                 << " textureCapacity=" << textureDescriptorCapacity_
+                 << " accelerationStructureUpdateAfterBind=" << accelerationStructureUpdateAfterBind_ << std::endl;
     initPipelineCache();
 
     vkGetDeviceQueue(device_, physicalDevice_->mainQueueIndex(), 0, &mainQueue_);
@@ -696,6 +708,53 @@ std::recursive_mutex &vk::Device::asyncComputeQueueMutex() {
 
 bool vk::Device::hasExtendedDynamicState2LogicOp() const {
     return extendedDynamicState2LogicOp_;
+}
+
+bool vk::Device::hasDynamicColorBlendState() const {
+    return dynamicColorBlendState_;
+}
+
+bool vk::Device::hasAccelerationStructureUpdateAfterBind() const {
+    return accelerationStructureUpdateAfterBind_;
+}
+
+uint32_t vk::Device::textureDescriptorCapacity() const {
+    return textureDescriptorCapacity_;
+}
+
+void vk::Device::initTextureDescriptorCapacity() {
+    // Query the exact UI layout, including its extra post-process sampler and
+    // binding flags. Both UI and world textures share the resulting ID range.
+    VkDescriptorSetLayoutBinding bindings[] = {
+        {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 0, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+        {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+    };
+    constexpr VkDescriptorBindingFlags flags = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
+                                               VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT |
+                                               VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+    VkDescriptorBindingFlags bindingFlags[] = {flags, flags};
+    VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{};
+    flagsInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+    flagsInfo.bindingCount = 2;
+    flagsInfo.pBindingFlags = bindingFlags;
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.pNext = &flagsInfo;
+    layoutInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+    layoutInfo.bindingCount = 2;
+    layoutInfo.pBindings = bindings;
+    uint32_t low = 0, high = 4096;
+    while (low < high) {
+        uint32_t candidate = low + (high - low + 1) / 2;
+        bindings[0].descriptorCount = candidate;
+        VkDescriptorSetLayoutSupport support{};
+        support.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_SUPPORT;
+        vkGetDescriptorSetLayoutSupport(device_, &layoutInfo, &support);
+        if (support.supported) low = candidate;
+        else high = candidate - 1;
+    }
+    if (low == 0) { throw std::runtime_error("No supported texture descriptor layout"); }
+    textureDescriptorCapacity_ = low;
 }
 
 bool vk::Device::hasMultiDrawIndirect() const {

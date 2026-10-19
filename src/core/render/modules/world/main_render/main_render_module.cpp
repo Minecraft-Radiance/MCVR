@@ -1562,7 +1562,7 @@ void MainRenderModule::initDescriptorTables() {
         set0Bindings.defineDescriptorLayoutSetBinding({
             .binding = 0,
             .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 4096,
+            .descriptorCount = framework->device()->textureDescriptorCapacity(),
             .stageFlags = runtimeTextureStageFlags,
         });
         set0Bindings.endDescriptorLayoutSetBinding();

@@ -425,6 +425,9 @@ void initMainRay(vec3 origin, vec3 direction, uint seed, float coneSpread, out M
     raySetLobeType(ray, 0u);
     ray.directLightRadiance = vec3(0.0);
     ray.pad0 = 0u;
+#if defined(MCVR_RAY_MATERIAL_PAYLOAD) && MCVR_RAY_MATERIAL_PAYLOAD
+    rayClearMaterial(ray);
+#endif
 }
 
 void resetMainRay(inout MainRay ray, int bounce) {

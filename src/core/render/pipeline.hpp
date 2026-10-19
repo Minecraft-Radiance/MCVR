@@ -22,6 +22,7 @@ struct WorldPipelineBuildParams {
 };
 
 class Framework;
+struct WorldTimingCapture;
 struct FrameworkContext;
 class WorldModule;
 struct WorldModuleContext;
@@ -89,6 +90,7 @@ struct WorldPipelineContext : public SharedObject<WorldPipelineContext> {
 
     std::shared_ptr<vk::DeviceLocalImage> outputImage;
     std::vector<std::shared_ptr<WorldModuleContext>> worldModuleContexts;
+    std::shared_ptr<WorldTimingCapture> timingCapture;
 
     WorldPipelineContext(std::shared_ptr<FrameworkContext> frameworkContext,
                          std::shared_ptr<WorldPipeline> worldPipeline);

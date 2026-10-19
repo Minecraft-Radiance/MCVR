@@ -23,6 +23,101 @@
 #include <cstdlib>
 #include <set>
 #include <stdexcept>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+
+struct WorldTimingCapture {
+    using Clock = std::chrono::steady_clock;
+    static bool enabled() {
+        const char *value = std::getenv("MCVR_PERFORMANCE_CAPTURE");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }
+
+    std::shared_ptr<vk::Device> device;
+    VkQueryPool pool = VK_NULL_HANDLE;
+    std::vector<std::string> names;
+    std::vector<uint64_t> timestamps;
+    std::vector<double> cpuMilliseconds;
+    float timestampPeriod = 0;
+    uint64_t timestampMask = UINT64_MAX;
+    bool pending = false;
+    uint32_t slot = 0;
+    uint64_t samples = 0;
+    Clock::time_point cpuStart;
+    Clock::time_point lastReport{};
+
+    WorldTimingCapture(std::shared_ptr<FrameworkContext> context, const std::vector<std::string> &moduleNames)
+        : device(context->device), names(moduleNames), timestamps(names.size() * 2),
+          cpuMilliseconds(names.size()), slot(context->frameIndex) {
+        if (names.empty()) return;
+        auto physical = context->physicalDevice;
+        timestampPeriod = physical->properties().limits.timestampPeriod;
+        uint32_t count = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(physical->vkPhysicalDevice(), &count, nullptr);
+        std::vector<VkQueueFamilyProperties> queues(count);
+        vkGetPhysicalDeviceQueueFamilyProperties(physical->vkPhysicalDevice(), &count, queues.data());
+        uint32_t bits = queues.at(physical->mainQueueIndex()).timestampValidBits;
+        if (bits == 0 || timestampPeriod <= 0) {
+            std::fprintf(stderr, "[RADIANCE-E15-PERF] GPU timestamps unavailable; capture disabled\n");
+            return;
+        }
+        timestampMask = bits == 64 ? UINT64_MAX : (uint64_t(1) << bits) - 1;
+        VkQueryPoolCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        info.queryCount = static_cast<uint32_t>(timestamps.size());
+        VkResult result = vkCreateQueryPool(device->vkDevice(), &info, nullptr, &pool);
+        if (result != VK_SUCCESS) {
+            pool = VK_NULL_HANDLE;
+            std::fprintf(stderr, "[RADIANCE-E15-PERF] query pool unavailable: %d\n", int(result));
+        }
+    }
+
+    ~WorldTimingCapture() {
+        if (pool != VK_NULL_HANDLE) vkDestroyQueryPool(device->vkDevice(), pool, nullptr);
+    }
+
+    void begin(VkCommandBuffer command, uint32_t width, uint32_t height) {
+        if (pool == VK_NULL_HANDLE) return;
+        // acquireContext already waited this slot's fence. Never wait again for
+        // profiling: read completed queries, then reset them in the next frame.
+        if (pending) {
+            VkResult result = vkGetQueryPoolResults(device->vkDevice(), pool, 0,
+                static_cast<uint32_t>(timestamps.size()), timestamps.size() * sizeof(uint64_t),
+                timestamps.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+            auto now = Clock::now();
+            if (result == VK_SUCCESS && (samples == 0 || now - lastReport >= std::chrono::seconds(5))) {
+                auto milliseconds = [&](uint64_t start, uint64_t end) {
+                    return double((end - start) & timestampMask) * timestampPeriod / 1e6;
+                };
+                std::fprintf(stderr, "[RADIANCE-E15-PERF] sample=%llu slot=%u output=%ux%u gpu_world_span_ms=%.3f\n",
+                    static_cast<unsigned long long>(samples), slot, width, height,
+                    milliseconds(timestamps.front(), timestamps.back()));
+                for (size_t i = 0; i < names.size(); ++i) {
+                    std::fprintf(stderr, "[RADIANCE-E15-PERF] module=%s gpu_interval_ms=%.3f cpu_record_ms=%.3f\n",
+                        names[i].c_str(), milliseconds(timestamps[2 * i], timestamps[2 * i + 1]), cpuMilliseconds[i]);
+                }
+                lastReport = now;
+            }
+            ++samples;
+        }
+        vkCmdResetQueryPool(command, pool, 0, static_cast<uint32_t>(timestamps.size()));
+        pending = true;
+    }
+
+    void beginModule(VkCommandBuffer command, uint32_t index) {
+        if (pool == VK_NULL_HANDLE) return;
+        cpuStart = Clock::now();
+        vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, pool, 2 * index);
+    }
+
+    void endModule(VkCommandBuffer command, uint32_t index) {
+        if (pool == VK_NULL_HANDLE) return;
+        vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pool, 2 * index + 1);
+        cpuMilliseconds[index] = std::chrono::duration<double, std::milli>(Clock::now() - cpuStart).count();
+    }
+};
 
 WorldPipelineBlueprint::WorldPipelineBlueprint(WorldPipelineBuildParams *params) {
     MCVR_PROFILE_SCOPE("native.WorldPipelineBlueprint.build");
@@ -267,6 +362,9 @@ WorldPipelineContext::WorldPipelineContext(std::shared_ptr<FrameworkContext> fra
     for (int i = 0; i < worldModules.size(); i++) {
         worldModuleContexts.push_back(worldModules[i]->contexts()[frameworkContext->frameIndex]);
     }
+    if (WorldTimingCapture::enabled()) {
+        timingCapture = std::make_shared<WorldTimingCapture>(frameworkContext, worldPipeline->worldModuleNames_);
+    }
 }
 
 void WorldPipelineContext::render() {
@@ -312,7 +410,12 @@ void WorldPipelineContext::render() {
     }
 
     auto wp = worldPipeline.lock();
+    if (timingCapture) {
+        timingCapture->begin(worldCommandBuffer->vkCommandBuffer(), outputImage ? outputImage->width() : 0,
+                             outputImage ? outputImage->height() : 0);
+    }
     for (int i = 0; i < worldModuleContexts.size(); i++) {
+        if (timingCapture) timingCapture->beginModule(worldCommandBuffer->vkCommandBuffer(), i);
         if (wp != nullptr && i < static_cast<int>(wp->worldModuleNames_.size())) {
             std::string debugLabelName = "world/" + wp->worldModuleNames_[i];
             vk::CommandBuffer::ScopedDebugLabel debugLabel(*worldCommandBuffer, debugLabelName.c_str(), 0.30f, 0.85f,
@@ -324,6 +427,7 @@ void WorldPipelineContext::render() {
             MCVR_PROFILE_SCOPE("native.WorldModule.render");
             worldModuleContexts[i]->render();
         }
+        if (timingCapture) timingCapture->endModule(worldCommandBuffer->vkCommandBuffer(), i);
     }
 
     worldCommandBuffer->barriersBufferImage(

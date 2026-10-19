@@ -3,7 +3,9 @@
 
 #include "util/ray_payloads.glsl"
 
-#if defined(VPT_MATERIAL_STATE_BINDING)
+#if defined(MCVR_RAY_MATERIAL_PAYLOAD) && MCVR_RAY_MATERIAL_PAYLOAD
+// No storage-image round trip is needed for the payload material path.
+#elif defined(VPT_MATERIAL_STATE_BINDING)
 layout(set = 5, binding = VPT_MATERIAL_STATE_BINDING, rgba16f) uniform image2DArray rayMaterialStateImage;
 #elif defined(ADV_MATERIAL_STATE_BINDING)
 layout(set = 5, binding = ADV_MATERIAL_STATE_BINDING, rgba16f) uniform image2DArray rayMaterialStateImage;
@@ -139,9 +141,15 @@ uint rayLobeType(MainRay ray) {
 }
 
 void rayClearMaterial(inout MainRay ray) {
+#if defined(MCVR_RAY_MATERIAL_PAYLOAD) && MCVR_RAY_MATERIAL_PAYLOAD
+    ray.materialAlbedo = vec4(0.0);
+    ray.materialF0Roughness = vec4(0.0);
+    ray.materialProperties = vec4(0.0);
+#else
     imageStore(rayMaterialStateImage, rayMaterialStateCoord(0), vec4(0.0));
     imageStore(rayMaterialStateImage, rayMaterialStateCoord(1), vec4(0.0));
     imageStore(rayMaterialStateImage, rayMaterialStateCoord(2), vec4(0.0));
+#endif
 }
 
 void rayStoreMaterial(inout MainRay ray,
@@ -152,9 +160,15 @@ void rayStoreMaterial(inout MainRay ray,
                       float transmission,
                       float ior,
                       float emission) {
+#if defined(MCVR_RAY_MATERIAL_PAYLOAD) && MCVR_RAY_MATERIAL_PAYLOAD
+    ray.materialAlbedo = albedoValue;
+    ray.materialF0Roughness = vec4(f0, roughness);
+    ray.materialProperties = vec4(metallic, transmission, ior, emission);
+#else
     imageStore(rayMaterialStateImage, rayMaterialStateCoord(0), albedoValue);
     imageStore(rayMaterialStateImage, rayMaterialStateCoord(1), vec4(f0, roughness));
     imageStore(rayMaterialStateImage, rayMaterialStateCoord(2), vec4(metallic, transmission, ior, emission));
+#endif
 }
 
 void rayStoreAux(inout MainRay ray, vec2 aux) {
@@ -167,10 +181,16 @@ vec2 rayLoadAux(MainRay ray) {
 
 MaterialInfo rayLoadMaterial(MainRay ray) {
     MaterialInfo mat;
+#if defined(MCVR_RAY_MATERIAL_PAYLOAD) && MCVR_RAY_MATERIAL_PAYLOAD
+    vec4 albedoValue = ray.materialAlbedo;
+    vec4 f0Roughness = ray.materialF0Roughness;
+    vec4 materialValues = ray.materialProperties;
+#else
     memoryBarrierImage();
     vec4 albedoValue = imageLoad(rayMaterialStateImage, rayMaterialStateCoord(0));
     vec4 f0Roughness = imageLoad(rayMaterialStateImage, rayMaterialStateCoord(1));
     vec4 materialValues = imageLoad(rayMaterialStateImage, rayMaterialStateCoord(2));
+#endif
 
     mat.albedoValue = albedoValue;
     mat.f0 = f0Roughness.rgb;

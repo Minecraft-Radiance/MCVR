@@ -33,7 +33,9 @@ struct OverlayDynamicDrawShaderInfo {
     std::unordered_map<std::string, std::string> definitions;
     VkPrimitiveTopology topology;
     GraphicsPipelineShaders shaders;
+    vk::VertexLayoutInfo vertexLayout;
     std::shared_ptr<vk::DynamicGraphicsPipeline> pipeline;
+    std::map<std::array<uint32_t, 8>, std::shared_ptr<vk::DynamicGraphicsPipeline>> colorPipelines;
 };
 
 struct OverlayTextureBinding {
@@ -73,6 +75,8 @@ class UIModule : public SharedObject<UIModule> {
                                        const std::string &fragmentShaderPath,
                                        const std::unordered_map<std::string, std::string> &definitions);
     const OverlayDynamicDrawShaderInfo &overlayDrawShaderInfo(uint32_t shaderId) const;
+    std::shared_ptr<vk::DynamicGraphicsPipeline> overlayDrawPipeline(
+        uint32_t shaderId, VkPipelineColorBlendAttachmentState colorState);
 
     void bindTexture(std::shared_ptr<vk::Sampler> sampler, std::shared_ptr<vk::DeviceLocalImage> image, int index);
     void refreshOverlayDescriptorTable(uint32_t frameIndex);

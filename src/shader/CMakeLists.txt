@@ -9,6 +9,10 @@ file(GLOB_RECURSE GLSL_SHADERS CONFIGURE_DEPENDS "*.vert" "*.frag" "*.rgen" "*.r
 list(FILTER GLSL_SHADERS EXCLUDE REGEX "world/ray_tracing/internal")
 file(GLOB_RECURSE GLSL_DEPENDS CONFIGURE_DEPENDS "../common/*.hpp" "../common/*.glsl" "util/*.glsl")
 list(APPEND GLSL_DEPENDS "${PROJECT_SOURCE_DIR}/extern/nrd/Shaders/Include/NRD.hlsli")
+file(GLOB_RECURSE FSR1_HEADER_DEPENDS CONFIGURE_DEPENDS
+    "${PROJECT_SOURCE_DIR}/extern/FidelityFX-SDK/sdk/include/FidelityFX/gpu/*.h")
+list(APPEND GLSL_DEPENDS ${FSR1_HEADER_DEPENDS}
+    "${CMAKE_CURRENT_SOURCE_DIR}/world/upscaler/fsr1_common.glsl")
 
 set(SPIRV_OUTPUT_PATH "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 file(MAKE_DIRECTORY ${SPIRV_OUTPUT_PATH})
@@ -30,7 +34,7 @@ foreach(GLSL_SHADER ${GLSL_SHADERS})
     add_custom_command(
         OUTPUT "${SPIRV_FILE}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${OUTPUT_DIR}"
-        COMMAND ${GLSLVALIDATOR} ${SHADER_FLAGS} -V "${GLSL_SHADER}" -o "${SPIRV_FILE}" --target-env vulkan1.4 -I${PROJECT_SOURCE_DIR}/src -I${CMAKE_CURRENT_SOURCE_DIR}/util
+        COMMAND ${GLSLVALIDATOR} ${SHADER_FLAGS} -V "${GLSL_SHADER}" -o "${SPIRV_FILE}" --target-env vulkan1.4 -I${PROJECT_SOURCE_DIR}/src -I${CMAKE_CURRENT_SOURCE_DIR}/util -I${PROJECT_SOURCE_DIR}/extern/FidelityFX-SDK/sdk/include/FidelityFX/gpu
         DEPENDS "${GLSL_SHADER}" ${GLSL_DEPENDS}
         VERBATIM
         COMMAND_EXPAND_LISTS
