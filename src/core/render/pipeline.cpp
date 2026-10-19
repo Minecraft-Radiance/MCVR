@@ -161,7 +161,10 @@ void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<P
         {
             vk::ResourceMemoryTagScope memoryTag("world_module.main_render.shader_pack");
             if (!shaderPack->initialize(buildConfig, error)) {
-                std::cerr << "[World Pipeline] Failed to load shared shader pack. Reason: " << error << std::endl;
+              if (FILE *f = std::fopen("/tmp/mcvr-error.log", "a")) {
+    std::fprintf(f, "[MCVR] Shader pack initialization FAILED: %s\n", error.c_str());
+    std::fclose(f);
+}
                 throw std::runtime_error("failed to load shared shader pack");
             }
         }
