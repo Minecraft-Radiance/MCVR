@@ -905,7 +905,8 @@ void main() {
         }
         imageStore(diffuseAlbedoImage, pixel,
                    vec4(firstHitMat.albedoValue.rgb * firstHitMat.albedoValue.a, firstHitMat.metallic));
-        imageStore(specularAlbedoImage, pixel, vec4(firstHitMat.f0, 0.0));
+        float transparentMaterialGuide = firstHitMat.transmission > EPS ? 1.0 : 0.0;
+        imageStore(specularAlbedoImage, pixel, vec4(firstHitMat.f0, transparentMaterialGuide));
 
         imageStore(normalRoughnessImage, pixel, vec4(mainRay.normal, firstHitMat.roughness));
 

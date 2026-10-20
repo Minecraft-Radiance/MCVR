@@ -18,6 +18,7 @@ layout(set = 0, binding = 5, rgba16f) uniform readonly image2D composeBaseEmissi
 layout(set = 0, binding = 6, rgba16f) uniform readonly image2D directLightGuideNormalRoughnessImage;
 layout(set = 0, binding = 7, rgba16f) uniform readonly image2D directLightGuideMotionDepthImage;
 layout(set = 0, binding = 8, rgba16f) uniform readonly image2D composeFogImage;
+layout(set = 0, binding = 10, rgba16f) uniform readonly image2D firstHitRefractionImage;
 
 
 layout(set = 1, binding = 0, rgba16f) uniform readonly image2D denoisedIndirectDiffuseRadianceImage;
@@ -313,6 +314,7 @@ void main() {
 
     vec4 clear = imageLoad(composeClearRadianceImage, pixel);
     vec3 clearRadiance = clear.rgb * clear.a;
+    vec4 firstHitRefraction = imageLoad(firstHitRefractionImage, pixel);
     vec4 emission = imageLoad(composeBaseEmissionImage, pixel);
     vec3 emissionRadiance = isFiniteComposeVec3(emission.rgb) ? max(emission.rgb, vec3(0.0)) : vec3(0.0);
     vec4 fogData = imageLoad(composeFogImage, pixel);
@@ -323,7 +325,10 @@ void main() {
         result = applyFogCompose(clearRadiance, fogData);
     } else {
         vec3 baseRadiance =
-            diffRadiance + specRadiance + directDiffuseRadiance + directSpecularRadiance + emissionRadiance;
+            diffRadiance + specRadiance + directDiffuseRadiance + directSpecularRadiance + emissionRadiance +
+            (clear.a <= 0.0 && firstHitRefraction.a > 0.0 ?
+                 sanitizeComposeRadiance(firstHitRefraction.rgb) :
+                 vec3(0.0));
         if (useFogCompose && skyUBO.cameraSubmersionType == 1) { baseRadiance *= underwaterColor; }
         result = applyFogCompose(baseRadiance, fogData);
     }

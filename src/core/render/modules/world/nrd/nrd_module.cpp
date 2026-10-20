@@ -335,6 +335,7 @@ void NrdModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<World
     sharedSpecularAlbedoImages_.resize(size);
 
     composeClearRadianceImages_.resize(size);
+    composeFirstHitRefractionImages_.resize(size);
     composeBaseEmissionImages_.resize(size);
     composeFogImages_.resize(size);
     denoisedRadianceImages_.resize(size);
@@ -374,6 +375,7 @@ bool NrdModule::setOrCreateInputImages(std::vector<std::shared_ptr<vk::DeviceLoc
     sharedSpecularAlbedoImages_[frameIndex] = images[SHARED_SPECULAR_ALBEDO_INPUT];
 
     composeClearRadianceImages_[frameIndex] = images[COMPOSE_CLEAR_RADIANCE_INPUT];
+    composeFirstHitRefractionImages_[frameIndex] = images[COMPOSE_FIRST_HIT_REFRACTION_INPUT];
     composeBaseEmissionImages_[frameIndex] = images[COMPOSE_BASE_EMISSION_INPUT];
     composeFogImages_[frameIndex] = images[COMPOSE_FOG_INPUT];
 
@@ -671,7 +673,7 @@ void NrdModule::initDescriptorTables() {
             auto builder = vk::DescriptorTableBuilder{};
             auto &set0BindingBuilder = builder.beginDescriptorLayoutSet().beginDescriptorLayoutSetBinding();
 
-            for (uint32_t binding : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u}) {
+            for (uint32_t binding : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u}) {
                 set0BindingBuilder.defineDescriptorLayoutSetBinding({
                     .binding = binding,
                     .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
@@ -1033,6 +1035,15 @@ void NrdModule::initImages() {
         composeDescriptorTables_[i]->bindImage(indirectGuideNormalRoughnessImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 2);
         composeDescriptorTables_[i]->bindImage(indirectGuideDepthImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 3);
         composeDescriptorTables_[i]->bindImage(composeClearRadianceImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 4);
+        const auto &firstHitRefractionImage = composeFirstHitRefractionImages_[i];
+        if (firstHitRefractionImage == nullptr) {
+            throw std::runtime_error("NRD refraction composition input is not connected");
+        }
+        composeDescriptorTables_[i]->bindImage(firstHitRefractionImage, VK_IMAGE_LAYOUT_GENERAL, 0, 10);
+        if (i == 0) {
+            std::fprintf(stderr, "[RADIANCE-E16] nrdComposeFirstHitRefraction=bound descriptor=0:10 extent=%ux%u\n",
+                         firstHitRefractionImage->width(), firstHitRefractionImage->height());
+        }
         composeDescriptorTables_[i]->bindImage(composeBaseEmissionImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 5);
         composeDescriptorTables_[i]->bindImage(directLightGuideNormalRoughnessImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0,
                                                6);
@@ -1174,6 +1185,7 @@ NrdModuleContext::NrdModuleContext(std::shared_ptr<FrameworkContext> frameworkCo
       sharedDiffuseAlbedoMetallicImage(nrdModule->sharedDiffuseAlbedoMetallicImages_[frameworkContext->frameIndex]),
       sharedSpecularAlbedoImage(nrdModule->sharedSpecularAlbedoImages_[frameworkContext->frameIndex]),
       composeClearRadianceImage(nrdModule->composeClearRadianceImages_[frameworkContext->frameIndex]),
+      composeFirstHitRefractionImage(nrdModule->composeFirstHitRefractionImages_[frameworkContext->frameIndex]),
       composeBaseEmissionImage(nrdModule->composeBaseEmissionImages_[frameworkContext->frameIndex]),
       composeFogImage(nrdModule->composeFogImages_[frameworkContext->frameIndex]),
       nrdIndirectDiffuseRadianceImage(nrdModule->nrdIndirectDiffuseRadianceImages_[frameworkContext->frameIndex]),
@@ -1534,6 +1546,7 @@ void NrdModuleContext::recordPasses(const std::shared_ptr<vk::CommandBuffer> &wo
         addBarrier(imageBarriers, indirectGuideNormalRoughnessImage);
         addBarrier(imageBarriers, indirectGuideDepthImage);
         addBarrier(imageBarriers, composeClearRadianceImage);
+        addBarrier(imageBarriers, composeFirstHitRefractionImage);
         addBarrier(imageBarriers, composeBaseEmissionImage);
         addBarrier(imageBarriers, composeFogImage);
         if (module->isSeparateDirectDenoisingEnabled_) {
