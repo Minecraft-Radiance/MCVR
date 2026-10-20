@@ -21,6 +21,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <iomanip>
 #include <limits>
@@ -33,6 +35,79 @@
 #include <utility>
 
 using json = nlohmann::json;
+
+// One pool per frame slot: acquireContext waits this slot's fence before reuse.
+// These are inclusive GPU intervals, not sums of independently scheduled work.
+struct MainRenderTimingCapture {
+    enum Stage : uint32_t { WorldPrepare, FrameGraph, RayDispatch, Count };
+    std::shared_ptr<vk::Device> device;
+    VkQueryPool pool = VK_NULL_HANDLE;
+    VkCommandBuffer frameCommand = VK_NULL_HANDLE;
+    std::array<bool, Count> written{};
+    float period = 0;
+    uint64_t mask = UINT64_MAX;
+    uint32_t slot = 0;
+    uint32_t previousWidth = 0, previousHeight = 0;
+    uint32_t traceWidth = 0, traceHeight = 0;
+    std::chrono::steady_clock::time_point lastReport{};
+
+    explicit MainRenderTimingCapture(const std::shared_ptr<FrameworkContext>& context)
+        : device(context->device), slot(context->frameIndex) {
+        period = context->physicalDevice->properties().limits.timestampPeriod;
+        uint32_t count = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(context->physicalDevice->vkPhysicalDevice(), &count, nullptr);
+        std::vector<VkQueueFamilyProperties> queues(count);
+        vkGetPhysicalDeviceQueueFamilyProperties(context->physicalDevice->vkPhysicalDevice(), &count, queues.data());
+        const uint32_t bits = queues.at(context->physicalDevice->mainQueueIndex()).timestampValidBits;
+        if (!bits || period <= 0) return;
+        mask = bits == 64 ? UINT64_MAX : (uint64_t(1) << bits) - 1;
+        VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        info.queryCount = Count * 2;
+        if (vkCreateQueryPool(device->vkDevice(), &info, nullptr, &pool) != VK_SUCCESS) pool = VK_NULL_HANDLE;
+        if (pool != VK_NULL_HANDLE && slot == 0)
+            std::fprintf(stderr, "[RADIANCE-E18] detailed_gpu_timing=enabled preserve_quality=1\n");
+    }
+    ~MainRenderTimingCapture() {
+        if (pool != VK_NULL_HANDLE) vkDestroyQueryPool(device->vkDevice(), pool, nullptr);
+    }
+    void beginFrame(VkCommandBuffer command, uint32_t width, uint32_t height) {
+        if (pool == VK_NULL_HANDLE) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastReport >= std::chrono::seconds(5)) {
+            static const char* names[] = {"world_prepare", "frame_graph", "ray_dispatch_first"};
+            bool reported = false;
+            for (uint32_t i = 0; i < Count; ++i) {
+                if (!written[i]) continue;
+                uint64_t values[2]{};
+                if (vkGetQueryPoolResults(device->vkDevice(), pool, i * 2, 2, sizeof(values), values,
+                                          sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) continue;
+                std::fprintf(stderr,
+                    "[RADIANCE-E18-PERF] slot=%u render=%ux%u trace=%ux%u stage=%s gpu_interval_ms=%.3f\n",
+                    slot, previousWidth, previousHeight, traceWidth, traceHeight, names[i],
+                    double((values[1] - values[0]) & mask) * period / 1e6);
+                reported = true;
+            }
+            if (reported) lastReport = now;
+        }
+        written.fill(false);
+        previousWidth = width; previousHeight = height;
+        traceWidth = traceHeight = 0;
+        frameCommand = command;
+        vkCmdResetQueryPool(command, pool, 0, Count * 2);
+    }
+    bool beginStage(VkCommandBuffer command, Stage stage) {
+        // Async branch command buffers have their own scheduling; do not write
+        // this frame's primary query pool from those branches or repeat a slot.
+        if (pool == VK_NULL_HANDLE || command != frameCommand || written[stage]) return false;
+        written[stage] = true;
+        vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, pool, stage * 2);
+        return true;
+    }
+    void endStage(VkCommandBuffer command, Stage stage) {
+        vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pool, stage * 2 + 1);
+    }
+};
 
 static constexpr std::array<std::string_view, 22> defaultRenderLayerOrder = {
     "solid",
@@ -6267,6 +6342,12 @@ void MainRenderModule::renderRayTracingPass(RayTracingPass &pass,
     MCVR_PROFILE_METRIC("ray_tracing.dispatch_width", traceWidth);
     MCVR_PROFILE_METRIC("ray_tracing.dispatch_height", traceHeight);
     MCVR_PROFILE_METRIC("ray_tracing.dispatch_depth", traceDepth);
+    const bool captureDispatch = context.timingCapture &&
+        context.timingCapture->beginStage(worldCommandBuffer->vkCommandBuffer(), MainRenderTimingCapture::RayDispatch);
+    if (captureDispatch) {
+        context.timingCapture->traceWidth = traceWidth;
+        context.timingCapture->traceHeight = traceHeight;
+    }
     if (pass.config.indirectArgsBuffer.has_value()) {
         MCVR_PROFILE_SCOPE("native.MainRenderModule.traceRaysIndirectCommand");
         command->raytracingIndirect(pass.querySbts[frameIndex],
@@ -6275,6 +6356,8 @@ void MainRenderModule::renderRayTracingPass(RayTracingPass &pass,
         MCVR_PROFILE_SCOPE("native.MainRenderModule.traceRaysCommand");
         command->raytracing(pass.querySbts[frameIndex], traceWidth, traceHeight, traceDepth);
     }
+    if (captureDispatch) context.timingCapture->endStage(worldCommandBuffer->vkCommandBuffer(),
+                                                       MainRenderTimingCapture::RayDispatch);
 }
 
 void MainRenderModule::prepareSharcResources(MainRenderModuleContext &context, bool writes) {
@@ -6807,6 +6890,13 @@ void MainRenderModuleContext::render() {
 
     auto buffers = Renderer::instance().buffers();
     auto chunks = Renderer::instance().world()->chunks();
+    if (!timingCapture) {
+        const char* capture = std::getenv("MCVR_PERFORMANCE_CAPTURE");
+        if (capture && std::strcmp(capture, "1") == 0)
+            timingCapture = std::make_shared<MainRenderTimingCapture>(context);
+    }
+    if (timingCapture) timingCapture->beginFrame(worldCommandBuffer->vkCommandBuffer(),
+                                               hdrNoisyOutputImage->width(), hdrNoisyOutputImage->height());
     if (!buffers->hasWorldHistory()) { module->initExecutionVariables(); }
     trackedImageStates.clear();
     trackedBufferStates.clear();
@@ -6822,7 +6912,10 @@ void MainRenderModuleContext::render() {
     {
         vk::CommandBuffer::ScopedDebugLabel debugLabel(*worldCommandBuffer, "main_render/world_prepare", 0.75f, 0.45f,
                                                        0.20f);
+        const bool capture = timingCapture && timingCapture->beginStage(worldCommandBuffer->vkCommandBuffer(),
+                                                                      MainRenderTimingCapture::WorldPrepare);
         worldPrepareContext->render(accelerationStructureBuildMode);
+        if (capture) timingCapture->endStage(worldCommandBuffer->vkCommandBuffer(), MainRenderTimingCapture::WorldPrepare);
     }
 
     const std::vector<ExpressionEvaluator::Variable> runtimeExpressionVariables =
@@ -6869,7 +6962,10 @@ void MainRenderModuleContext::render() {
         {
             vk::CommandBuffer::ScopedDebugLabel debugLabel(*worldCommandBuffer, "main_render/frame_graph", 0.60f, 0.60f,
                                                            0.35f);
+            const bool capture = timingCapture && timingCapture->beginStage(worldCommandBuffer->vkCommandBuffer(),
+                                                                          MainRenderTimingCapture::FrameGraph);
             frameGraph.record(*module, *this);
+            if (capture) timingCapture->endStage(worldCommandBuffer->vkCommandBuffer(), MainRenderTimingCapture::FrameGraph);
         }
         {
             vk::CommandBuffer::ScopedDebugLabel debugLabel(

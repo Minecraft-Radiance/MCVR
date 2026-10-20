@@ -617,7 +617,8 @@ vec3 sampleSurfaceDirectLight(SampledSurface surface,
     vec3 shadowOrigin = baseWorldPos + visibilityNormal * 0.0002;
     uint shadowMask = WORLD_MASK | PLAYER_MASK;
     if (VPT_CLOUD_MODE != 2u) { shadowMask |= CLOUD_MASK; }
-    traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, shadowMask, 0, 0, 0, shadowOrigin, 0.0001, sampledLightDir, 1000.0, 1);
+    traceRayEXT(topLevelAS, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT, shadowMask, 0, 0, 0,
+                shadowOrigin, 0.0001, sampledLightDir, 1000.0, 1);
 
     float progress = skyUBO.rainGradient;
     vec3 lightRadiance = shadowRay.radiance * mainRay.throughput * lightBRDF;

@@ -246,7 +246,8 @@ vec3 sampleVolumetricDirectionalLight(vec3 position, vec3 lightDir, bool insideB
     uint shadowMask = WORLD_MASK | PLAYER_MASK;
     if (VPT_CLOUD_MODE == 1u) { shadowMask |= CLOUD_MASK; }
     vec3 origin = position + lightDir * 0.02;
-    traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, shadowMask, 0, 0, 0, origin, 0.001, lightDir, max(1000.0, float(worldUBO.vistaDistanceBlocks)), 1);
+    traceRayEXT(topLevelAS, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT, shadowMask, 0, 0, 0,
+                origin, 0.001, lightDir, max(1000.0, float(worldUBO.vistaDistanceBlocks)), 1);
     vec3 radiance = applySampledLightChroma(shadowRay.radiance, lightDir) * (1.0 - skyUBO.rainGradient);
     vec3 absolutePosition = position + vec3(worldUBO.cameraPos.xyz);
     float cloudVisibility =

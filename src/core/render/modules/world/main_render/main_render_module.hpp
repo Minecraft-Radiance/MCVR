@@ -22,6 +22,7 @@ class WorldPipeline;
 struct WorldModuleContext;
 
 struct MainRenderModuleContext;
+struct MainRenderTimingCapture;
 
 class WorldPrepare;
 struct WorldPrepareContext;
@@ -498,6 +499,7 @@ struct MainRenderModuleContext : public WorldModuleContext, SharedObject<MainRen
     std::shared_ptr<vk::DeviceLocalImage> segmentationMaskImage;
 
     std::shared_ptr<WorldPrepareContext> worldPrepareContext;
+    std::shared_ptr<MainRenderTimingCapture> timingCapture;
     bool worldPrepareBuffersBound = false;
     std::shared_ptr<vk::TLAS> boundWorldPrepareTlas;
 #if defined(MCVR_ENABLE_PROFILER)
