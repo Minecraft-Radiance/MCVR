@@ -477,7 +477,16 @@ std::shared_ptr<vk::DescriptorTable> vk::DescriptorTableBuilder::build(std::shar
         }
 
         std::vector<VkDescriptorBindingFlags> bindingFlags(static_cast<uint32_t>(setBindingBuilder.bindings.size()), 0);
-        const bool updateAfterBind = !hasDynamicDescriptor && !setBindingBuilder.isStaticDescriptor;
+        const bool hasUnsupportedAccelerationStructure =
+            !device->hasAccelerationStructureUpdateAfterBind() &&
+            std::any_of(setBindingBuilder.bindings.begin(), setBindingBuilder.bindings.end(),
+                        [](const VkDescriptorSetLayoutBinding &binding) {
+                            return binding.descriptorType == VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+                        });
+        // Acceleration structures in an update-after-bind pool also have separate
+        // descriptor limits (zero on MageVK), so make their entire set static.
+        const bool updateAfterBind = !hasDynamicDescriptor && !setBindingBuilder.isStaticDescriptor &&
+                                     !hasUnsupportedAccelerationStructure;
         if (updateAfterBind) {
             std::fill(bindingFlags.begin(), bindingFlags.end(),
                       VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |

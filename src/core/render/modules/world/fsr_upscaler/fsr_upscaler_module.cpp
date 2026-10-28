@@ -10,9 +10,15 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <iostream>
 
-FSRUpscalerModule::FSRUpscalerModule() {}
+FSRUpscalerModule::FSRUpscalerModule() {
+#if !defined(MCVR_ENABLE_FFX_UPSCALER) && !defined(MCVR_ENABLE_FSR1_SPATIAL)
+    fsr3Enabled_ = false;
+    qualityMode_ = QualityMode::NativeAA;
+#endif
+}
 
 bool FSRUpscalerModule::isHdrUpscaleFormat(VkFormat format) {
     switch (format) {
@@ -84,7 +90,8 @@ bool FSRUpscalerModule::setOrCreateInputImages(std::vector<std::shared_ptr<vk::D
             }
         }
         if (renderWidth_ == 0 || renderHeight_ == 0) {
-            getRenderResolution(displayWidth_, displayHeight_, qualityMode_, &renderWidth_, &renderHeight_);
+            getRenderResolution(displayWidth_, displayHeight_, fsr3Enabled_ ? qualityMode_ : QualityMode::NativeAA,
+                                &renderWidth_, &renderHeight_);
         }
     }
 
@@ -170,6 +177,9 @@ void FSRUpscalerModule::build() {
     config.enableSharpening = true;
     config.sharpness = sharpness_;
 
+#if defined(MCVR_ENABLE_FSR1_SPATIAL) && !defined(MCVR_ENABLE_FFX_UPSCALER)
+    initialized_ = fsr3Enabled_;
+#else
     if (!fsr3Enabled_) {
         initialized_ = false;
     } else if (!fsr3_->initialize(config)) {
@@ -178,10 +188,15 @@ void FSRUpscalerModule::build() {
     } else {
         initialized_ = true;
     }
+#endif
 
     initDescriptorTables();
     initImages();
     initPipeline();
+#if defined(MCVR_ENABLE_FSR1_SPATIAL) && !defined(MCVR_ENABLE_FFX_UPSCALER)
+    std::fprintf(stderr, "[RADIANCE-E15-FSR1] EASU+RCAS enabled=%u render=%ux%u display=%ux%u sharpness=%.3f frameGeneration=off\n",
+        unsigned(fsr3Enabled_), renderWidth_, renderHeight_, displayWidth_, displayHeight_, sharpness_);
+#endif
 
     contexts_.resize(size);
     for (uint32_t i = 0; i < size; i++) {
@@ -213,6 +228,25 @@ void FSRUpscalerModule::initDescriptorTables() {
     guideDescriptorTables_.resize(size);
     reactiveDescriptorTables_.resize(size);
     reactiveImages_.resize(size);
+#if defined(MCVR_ENABLE_FSR1_SPATIAL) && !defined(MCVR_ENABLE_FFX_UPSCALER)
+    fsr1DescriptorTables_.resize(size);
+    for (auto &table : fsr1DescriptorTables_) {
+        vk::DescriptorTableBuilder builder;
+        auto &bindings = builder.beginDescriptorLayoutSet().beginDescriptorLayoutSetBinding();
+        for (uint32_t binding = 0; binding < 3; ++binding) {
+            bindings.defineDescriptorLayoutSetBinding({
+                .binding = binding,
+                .descriptorType = binding == 0 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            });
+        }
+        bindings.endDescriptorLayoutSetBinding().endDescriptorLayoutSet().definePushConstant({
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = sizeof(float),
+        });
+        table = builder.build(fw->device());
+    }
+#endif
 
     auto createTable = [&]() {
         vk::DescriptorTableBuilder builder;
@@ -268,6 +302,20 @@ void FSRUpscalerModule::initDescriptorTables() {
 void FSRUpscalerModule::initImages() {
     auto fw = framework_.lock();
     uint32_t size = fw->swapchain()->imageCount();
+#if defined(MCVR_ENABLE_FSR1_SPATIAL) && !defined(MCVR_ENABLE_FFX_UPSCALER)
+    fsr1Sampler_ = vk::Sampler::create(fw->device(), VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_NEAREST,
+                                      VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+    fsr1IntermediateImages_.resize(size);
+    for (uint32_t i = 0; i < size; ++i) {
+        // Keep the bounded HDR mapping in FP32 until decoding after RCAS.
+        fsr1IntermediateImages_[i] = vk::DeviceLocalImage::create(
+            fw->device(), fw->vma(), false, displayWidth_, displayHeight_, 1,
+            VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT);
+        fsr1DescriptorTables_[i]->bindSamplerImage(fsr1Sampler_, inputImages_[i][0], VK_IMAGE_LAYOUT_GENERAL, 0, 0, 0);
+        fsr1DescriptorTables_[i]->bindImage(fsr1IntermediateImages_[i], VK_IMAGE_LAYOUT_GENERAL, 0, 1);
+        fsr1DescriptorTables_[i]->bindImage(outputImages_[i][0], VK_IMAGE_LAYOUT_GENERAL, 0, 2);
+    }
+#endif
 
     for (auto &image : historyDepthImages_) {
         image = vk::DeviceLocalImage::create(fw->device(), fw->vma(), false, renderWidth_, renderHeight_, 1,
@@ -301,6 +349,16 @@ void FSRUpscalerModule::initImages() {
 
 void FSRUpscalerModule::initPipeline() {
     auto fw = framework_.lock();
+#if defined(MCVR_ENABLE_FSR1_SPATIAL) && !defined(MCVR_ENABLE_FFX_UPSCALER)
+    auto easu = vk::Shader::create(fw->device(),
+        (Renderer::folderPath / "shaders/world/upscaler/fsr1_easu_comp.spv").string());
+    auto rcas = vk::Shader::create(fw->device(),
+        (Renderer::folderPath / "shaders/world/upscaler/fsr1_rcas_comp.spv").string());
+    fsr1EasuPipeline_ = vk::ComputePipelineBuilder{}.defineShader(easu)
+        .definePipelineLayout(fsr1DescriptorTables_[0]).build(fw->device());
+    fsr1RcasPipeline_ = vk::ComputePipelineBuilder{}.defineShader(rcas)
+        .definePipelineLayout(fsr1DescriptorTables_[0]).build(fw->device());
+#endif
     auto shader = vk::Shader::create(
         fw->device(), (Renderer::folderPath / "shaders/world/upscaler/linear_to_device_depth_comp.spv").string());
     auto firstHitDepthShader = vk::Shader::create(
@@ -361,6 +419,21 @@ void FSRUpscalerModule::setAttributes(int attributeCount, std::vector<std::strin
             preExposure_ = std::stof(value);
         }
     }
+#if !defined(MCVR_ENABLE_FFX_UPSCALER) && !defined(MCVR_ENABLE_FSR1_SPATIAL)
+    // Keep the existing native-resolution blit path when FFX is not compiled.
+    fsr3Enabled_ = false;
+    qualityMode_ = QualityMode::NativeAA;
+    renderWidth_ = displayWidth_;
+    renderHeight_ = displayHeight_;
+#else
+    // A disabled upscaler must also stop reducing the upstream render size.
+    if (displayWidth_ && displayHeight_) {
+        getRenderResolution(displayWidth_, displayHeight_, fsr3Enabled_ ? qualityMode_ : QualityMode::NativeAA,
+                            &renderWidth_, &renderHeight_);
+    } else {
+        renderWidth_ = renderHeight_ = 0;
+    }
+#endif
 }
 
 std::vector<std::shared_ptr<WorldModuleContext>> &FSRUpscalerModule::contexts() {
@@ -391,11 +464,17 @@ void FSRUpscalerModule::getRenderResolution(uint32_t displayWidth,
         case QualityMode::Quality: ratio = 1.5f; break;
         case QualityMode::Balanced: ratio = 1.7f; break;
         case QualityMode::Performance: ratio = 2.0f; break;
-        case QualityMode::UltraPerformance: ratio = 3.0f; break;
+        case QualityMode::UltraPerformance:
+#if defined(MCVR_ENABLE_FSR1_SPATIAL) && !defined(MCVR_ENABLE_FFX_UPSCALER)
+            ratio = 4.0f; // Experimental: keep a usable display while tracing at roughly 120p.
+#else
+            ratio = 3.0f;
+#endif
+            break;
     }
 
-    *outRenderWidth = static_cast<uint32_t>(static_cast<float>(displayWidth) / ratio);
-    *outRenderHeight = static_cast<uint32_t>(static_cast<float>(displayHeight) / ratio);
+    *outRenderWidth = std::max(1u, static_cast<uint32_t>(static_cast<float>(displayWidth) / ratio));
+    *outRenderHeight = std::max(1u, static_cast<uint32_t>(static_cast<float>(displayHeight) / ratio));
 }
 
 FSRUpscalerModuleContext::FSRUpscalerModuleContext(std::shared_ptr<FrameworkContext> frameworkContext,
@@ -649,6 +728,57 @@ void FSRUpscalerModuleContext::render() {
         dispatchUpscaledNormalRoughness();
     };
 
+#if defined(MCVR_ENABLE_FSR1_SPATIAL) && !defined(MCVR_ENABLE_FFX_UPSCALER)
+    if (!module->fsr3Enabled_ || module->qualityMode_ == FSRUpscalerModule::QualityMode::NativeAA) {
+        fallbackBlit();
+        return;
+    }
+    const uint32_t frameIndex = fwContext->frameIndex;
+    auto intermediate = module->fsr1IntermediateImages_[frameIndex];
+    auto table = module->fsr1DescriptorTables_[frameIndex];
+    std::vector<vk::CommandBuffer::ImageMemoryBarrier> barriers;
+    for (auto image : {inputColorImage, intermediate, outputImage}) {
+        barriers.push_back({
+            .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            .dstAccessMask = image == inputColorImage ? VK_ACCESS_2_SHADER_READ_BIT : VK_ACCESS_2_SHADER_WRITE_BIT,
+            .oldLayout = image->imageLayout(), .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = mainQueueIndex, .dstQueueFamilyIndex = mainQueueIndex,
+            .image = image, .subresourceRange = vk::wholeColorSubresourceRange,
+        });
+        image->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+    }
+    worldCommandBuffer->barriersBufferImage({}, barriers);
+    worldCommandBuffer->bindDescriptorTable(table, VK_PIPELINE_BIND_POINT_COMPUTE)
+        ->bindComputePipeline(module->fsr1EasuPipeline_);
+    vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), (module->displayWidth_ + 15) / 16,
+                  (module->displayHeight_ + 15) / 16, 1);
+    worldCommandBuffer->barriersBufferImage({}, {{
+        .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_GENERAL, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = mainQueueIndex, .dstQueueFamilyIndex = mainQueueIndex,
+        .image = intermediate, .subresourceRange = vk::wholeColorSubresourceRange,
+    }});
+    worldCommandBuffer->bindComputePipeline(module->fsr1RcasPipeline_);
+    vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), table->vkPipelineLayout(),
+        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(float), &module->sharpness_);
+    vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), (module->displayWidth_ + 15) / 16,
+                  (module->displayHeight_ + 15) / 16, 1);
+    worldCommandBuffer->barriersBufferImage({}, {{
+        .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_GENERAL, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = mainQueueIndex, .dstQueueFamilyIndex = mainQueueIndex,
+        .image = outputImage, .subresourceRange = vk::wholeColorSubresourceRange,
+    }});
+    dispatchUpscaledFirstHitDepth();
+    dispatchUpscaledMotion();
+    dispatchUpscaledNormalRoughness();
+    return;
+#endif
     if (!module->fsr3Enabled_) {
         fallbackBlit();
         return;

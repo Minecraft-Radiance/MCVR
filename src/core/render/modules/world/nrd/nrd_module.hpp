@@ -18,7 +18,7 @@ class NrdModule : public WorldModule, public SharedObject<NrdModule> {
 
   public:
     static constexpr auto NAME = "render_pipeline.module.nrd.name";
-    static constexpr uint32_t inputImageNum = 19;
+    static constexpr uint32_t inputImageNum = 20;
     static constexpr uint32_t outputImageNum = 1;
 
     NrdModule();
@@ -65,6 +65,7 @@ class NrdModule : public WorldModule, public SharedObject<NrdModule> {
         SHARED_DIFFUSE_ALBEDO_METALLIC_INPUT,
         SHARED_SPECULAR_ALBEDO_INPUT,
         COMPOSE_CLEAR_RADIANCE_INPUT,
+        COMPOSE_FIRST_HIT_REFRACTION_INPUT,
         COMPOSE_BASE_EMISSION_INPUT,
         COMPOSE_FOG_INPUT,
         INPUT_IMAGE_COUNT,
@@ -122,6 +123,7 @@ class NrdModule : public WorldModule, public SharedObject<NrdModule> {
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> sharedSpecularAlbedoImages_;
 
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> composeClearRadianceImages_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> composeFirstHitRefractionImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> composeBaseEmissionImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> composeFogImages_;
 
@@ -250,6 +252,7 @@ struct NrdModuleContext : public WorldModuleContext, public SharedObject<NrdModu
     std::shared_ptr<vk::DeviceLocalImage> sharedSpecularAlbedoImage;
 
     std::shared_ptr<vk::DeviceLocalImage> composeClearRadianceImage;
+    std::shared_ptr<vk::DeviceLocalImage> composeFirstHitRefractionImage;
     std::shared_ptr<vk::DeviceLocalImage> composeBaseEmissionImage;
     std::shared_ptr<vk::DeviceLocalImage> composeFogImage;
 

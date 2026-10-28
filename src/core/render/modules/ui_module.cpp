@@ -1,4 +1,8 @@
 #include "core/render/modules/ui_module.hpp"
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
 
 #include "core/render/buffers.hpp"
 #include "core/render/pipeline.hpp"
@@ -10,6 +14,20 @@
 #include <fstream>
 #include <regex>
 #include <stdexcept>
+
+namespace {
+bool isFlatUiProbeEnabled() {
+#ifdef __APPLE__
+    static const bool enabled = [] {
+        const char *mode = std::getenv("MCVR_UI_PRESENT_PROBE");
+        return mode != nullptr && std::strcmp(mode, "flat-ui") == 0;
+    }();
+    return enabled;
+#else
+    return false;
+#endif
+}
+}
 
 UIModule::UIModule() {}
 
@@ -173,20 +191,37 @@ uint32_t UIModule::registerOverlayDrawShader(const std::string &key,
     info.topology = overlayTopologyForDrawMode(drawMode);
     info.shaders.vertexShader =
         vk::Shader::create(framework->device(), vertexShaderPath, VK_SHADER_STAGE_VERTEX_BIT, definitions);
+    std::string effectiveFragmentPath = fragmentShaderPath;
+    if (isFlatUiProbeEnabled()) {
+        // E07 changes the fragment stage only: no textures, discard or UBOs.
+        std::filesystem::path flatPath = std::filesystem::path(fragmentShaderPath).parent_path() /
+                                         "radiance-e07-flat-ui.frag";
+        if (!std::filesystem::exists(flatPath)) {
+            std::ofstream source(flatPath, std::ios::binary);
+            source << "#version 460\nlayout(location = 0) out vec4 outColor;\n"
+                      "void main() { outColor = vec4(0.0, 1.0, 0.0, 1.0); }\n";
+            if (!source) { throw std::runtime_error("E07: cannot write flat UI fragment shader"); }
+        }
+        effectiveFragmentPath = flatPath.string();
+        std::fprintf(stderr, "[RADIANCE-E07] flat fragment registered key=%s vertexFormat=%u uniformBytes=%u\n",
+                     key.c_str(), vertexFormatType, uniformSize);
+    }
     info.shaders.fragmentShader =
-        vk::Shader::create(framework->device(), fragmentShaderPath, VK_SHADER_STAGE_FRAGMENT_BIT, definitions);
+        vk::Shader::create(framework->device(), effectiveFragmentPath, VK_SHADER_STAGE_FRAGMENT_BIT, definitions);
 
-    vk::DynamicGraphicsPipelineBuilder builder{1};
-    vk::VertexLayoutInfo vertexLayout = makeOverlayVertexLayout(vertexFormatType, vertexShaderPath);
-    builder.defineRenderPass(overlayDrawRenderPass_, 0)
-        .beginShaderStage()
-        .defineShaderStage(info.shaders.vertexShader, VK_SHADER_STAGE_VERTEX_BIT)
-        .defineShaderStage(info.shaders.fragmentShader, VK_SHADER_STAGE_FRAGMENT_BIT)
-        .endShaderStage();
-    builder.defineVertexInputState(vertexLayout);
-    info.pipeline = builder.defineInputAssemblyState(info.topology)
-                        .definePipelineLayout(overlayDescriptorTables_[0])
-                        .build(framework->device());
+    info.vertexLayout = makeOverlayVertexLayout(vertexFormatType, vertexShaderPath);
+    if (framework->device()->hasDynamicColorBlendState()) {
+        vk::DynamicGraphicsPipelineBuilder builder{1};
+        builder.defineRenderPass(overlayDrawRenderPass_, 0)
+            .beginShaderStage()
+            .defineShaderStage(info.shaders.vertexShader, VK_SHADER_STAGE_VERTEX_BIT)
+            .defineShaderStage(info.shaders.fragmentShader, VK_SHADER_STAGE_FRAGMENT_BIT)
+            .endShaderStage();
+        builder.defineVertexInputState(info.vertexLayout);
+        info.pipeline = builder.defineInputAssemblyState(info.topology)
+                            .definePipelineLayout(overlayDescriptorTables_[0])
+                            .build(framework->device());
+    }
 
     uint32_t shaderId = overlayDynamicDrawShaders_.size();
     overlayDynamicDrawShaderIds_[key] = shaderId;
@@ -198,6 +233,38 @@ const OverlayDynamicDrawShaderInfo &UIModule::overlayDrawShaderInfo(uint32_t sha
     return overlayDynamicDrawShaders_.at(shaderId);
 }
 
+std::shared_ptr<vk::DynamicGraphicsPipeline> UIModule::overlayDrawPipeline(
+    uint32_t shaderId, VkPipelineColorBlendAttachmentState colorState) {
+    auto framework = framework_.lock();
+    auto &info = overlayDynamicDrawShaders_.at(shaderId);
+    if (framework->device()->hasDynamicColorBlendState()) { return info.pipeline; }
+
+    // Explicit fields avoid padding-dependent keys and preserve separate alpha
+    // blending. Cache ownership keeps variants alive while frames are in flight.
+    std::array<uint32_t, 8> key{
+        colorState.blendEnable, uint32_t(colorState.srcColorBlendFactor), uint32_t(colorState.dstColorBlendFactor),
+        uint32_t(colorState.colorBlendOp), uint32_t(colorState.srcAlphaBlendFactor),
+        uint32_t(colorState.dstAlphaBlendFactor), uint32_t(colorState.alphaBlendOp), colorState.colorWriteMask,
+    };
+    auto existing = info.colorPipelines.find(key);
+    if (existing != info.colorPipelines.end()) { return existing->second; }
+    vk::DynamicGraphicsPipelineBuilder builder{1};
+    builder.defineRenderPass(overlayDrawRenderPass_, 0)
+        .beginShaderStage()
+        .defineShaderStage(info.shaders.vertexShader, VK_SHADER_STAGE_VERTEX_BIT)
+        .defineShaderStage(info.shaders.fragmentShader, VK_SHADER_STAGE_FRAGMENT_BIT)
+        .endShaderStage();
+    builder.defineVertexInputState(info.vertexLayout);
+    auto pipeline = builder.defineInputAssemblyState(info.topology)
+                        .definePipelineLayout(overlayDescriptorTables_[0])
+                        .defineColorBlendAttachmentState(0, colorState)
+                        .build(framework->device());
+    info.colorPipelines.emplace(key, pipeline);
+    std::fprintf(stderr, "[RADIANCE-E15] static color pipeline shader=%s variant=%zu blend=%u mask=0x%x factors=%u,%u,%u,%u ops=%u,%u\n",
+                 info.key.c_str(), info.colorPipelines.size(), key[0], key[7], key[1], key[2], key[4], key[5], key[3], key[6]);
+    return pipeline;
+}
+
 std::shared_ptr<vk::DescriptorTable> UIModule::createOverlayDescriptorTable() {
     auto framework = framework_.lock();
 
@@ -207,7 +274,7 @@ std::shared_ptr<vk::DescriptorTable> UIModule::createOverlayDescriptorTable() {
         .defineDescriptorLayoutSetBinding({
             .binding = 0,
             .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 4096,
+            .descriptorCount = framework->device()->textureDescriptorCapacity(),
             .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
         })
         .defineDescriptorLayoutSetBinding({
@@ -256,6 +323,9 @@ void UIModule::bindTexture(std::shared_ptr<vk::Sampler> sampler,
                            std::shared_ptr<vk::DeviceLocalImage> image,
                            int index) {
     auto framework = framework_.lock();
+    if (index < 0 || uint32_t(index) >= framework->device()->textureDescriptorCapacity()) {
+        throw std::runtime_error("UI texture ID exceeds supported descriptor capacity");
+    }
     overlayTextureBindings_[index] = {
         .sampler = sampler,
         .image = image,
@@ -305,13 +375,17 @@ void UIModule::initOverlayDrawImages() {
     uint32_t size = framework->swapchain()->imageCount();
     overlayDrawColorImages_.resize(size);
     overlayDrawDepthStencilImages_.resize(size);
+#ifdef __APPLE__
+    std::fprintf(stderr, "[RADIANCE-E06] UI offscreen images: RGBA8_UNORM %ux%u, COLOR_ATTACHMENT|SAMPLED|TRANSFER_SRC|TRANSFER_DST, images=%u\n",
+                 framework->swapchain()->vkExtent().width, framework->swapchain()->vkExtent().height, size);
+#endif
 
     for (int i = 0; i < size; i++) {
         overlayDrawColorImages_[i] = vk::DeviceLocalImage::create(
             framework->device(), framework->vma(), false, framework->swapchain()->vkExtent().width,
             framework->swapchain()->vkExtent().height, 1, VK_FORMAT_R8G8B8A8_UNORM,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
-#ifdef USE_AMD
+#if defined(USE_AMD) || defined(__APPLE__)
                 | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
 #endif
         );
@@ -337,7 +411,7 @@ void UIModule::initOverlayDrawRenderPass() {
                                      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
                                      .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
                                      .stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE,
-#ifdef USE_AMD
+#if defined(USE_AMD) || defined(__APPLE__)
                                      .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                      .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 #else
@@ -403,7 +477,7 @@ void UIModule::initOverlayPostImages() {
             framework->device(), framework->vma(), false, framework->swapchain()->vkExtent().width,
             framework->swapchain()->vkExtent().height, 1, VK_FORMAT_R8G8B8A8_UNORM,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
-#ifdef USE_AMD
+#if defined(USE_AMD) || defined(__APPLE__)
                 | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
 #endif
         );
@@ -422,7 +496,7 @@ void UIModule::initOverlayPostRenderPass() {
                                      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
                                      .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
                                      .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-#ifdef USE_AMD
+#if defined(USE_AMD) || defined(__APPLE__)
                                      .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                      .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 #else
@@ -671,11 +745,11 @@ void UIModuleContext::syncToCommandBuffer() {
 
     vkCmdSetLineWidth(commandBuffer, overlayLineWidth);
 
-    vkCmdSetColorBlendEnableEXT(commandBuffer, 0, 1, &overlayBlendEnabled);
-
-    vkCmdSetColorBlendEquationEXT(commandBuffer, 0, 1, &overlayColorBlendEquation);
-
-    vkCmdSetColorWriteMaskEXT(commandBuffer, 0, 1, &overlayColorWriteMask);
+    if (context->device->hasDynamicColorBlendState()) {
+        vkCmdSetColorBlendEnableEXT(commandBuffer, 0, 1, &overlayBlendEnabled);
+        vkCmdSetColorBlendEquationEXT(commandBuffer, 0, 1, &overlayColorBlendEquation);
+        vkCmdSetColorWriteMaskEXT(commandBuffer, 0, 1, &overlayColorWriteMask);
+    }
 
     if (context->device->hasExtendedDynamicState2LogicOp()) {
         vkCmdSetLogicOpEXT(commandBuffer, overlayColorLogicOp);
@@ -788,7 +862,9 @@ void UIModuleContext::setOverlayBlendEnable(bool enable) {
     if (!framework->isRunning()) return;
 
     overlayBlendEnabled = enable;
-    vkCmdSetColorBlendEnableEXT(context->overlayCommandBuffer->vkCommandBuffer(), 0, 1, &overlayBlendEnabled);
+    if (context->device->hasDynamicColorBlendState()) {
+        vkCmdSetColorBlendEnableEXT(context->overlayCommandBuffer->vkCommandBuffer(), 0, 1, &overlayBlendEnabled);
+    }
 }
 
 void UIModuleContext::setOverlayColorBlendConstants(float const1, float const2, float const3, float const4) {
@@ -829,7 +905,9 @@ void UIModuleContext::setOverlayBlendFuncSeparate(int srcColorBlendFactor,
     overlayColorBlendEquation.srcAlphaBlendFactor = static_cast<VkBlendFactor>(srcAlphaBlendFactor);
     overlayColorBlendEquation.dstColorBlendFactor = static_cast<VkBlendFactor>(dstColorBlendFactor);
     overlayColorBlendEquation.dstAlphaBlendFactor = static_cast<VkBlendFactor>(dstAlphaBlendFactor);
-    vkCmdSetColorBlendEquationEXT(context->overlayCommandBuffer->vkCommandBuffer(), 0, 1, &overlayColorBlendEquation);
+    if (context->device->hasDynamicColorBlendState()) {
+        vkCmdSetColorBlendEquationEXT(context->overlayCommandBuffer->vkCommandBuffer(), 0, 1, &overlayColorBlendEquation);
+    }
 }
 
 void UIModuleContext::setOverlayBlendOpSeparate(int colorBlendOp, int alphaBlendOp) {
@@ -840,7 +918,9 @@ void UIModuleContext::setOverlayBlendOpSeparate(int colorBlendOp, int alphaBlend
 
     overlayColorBlendEquation.colorBlendOp = static_cast<VkBlendOp>(colorBlendOp);
     overlayColorBlendEquation.alphaBlendOp = static_cast<VkBlendOp>(alphaBlendOp);
-    vkCmdSetColorBlendEquationEXT(context->overlayCommandBuffer->vkCommandBuffer(), 0, 1, &overlayColorBlendEquation);
+    if (context->device->hasDynamicColorBlendState()) {
+        vkCmdSetColorBlendEquationEXT(context->overlayCommandBuffer->vkCommandBuffer(), 0, 1, &overlayColorBlendEquation);
+    }
 }
 
 void UIModuleContext::setOverlayColorWriteMask(int colorWriteMask) {
@@ -850,7 +930,9 @@ void UIModuleContext::setOverlayColorWriteMask(int colorWriteMask) {
     if (!framework->isRunning()) return;
 
     overlayColorWriteMask = colorWriteMask;
-    vkCmdSetColorWriteMaskEXT(context->overlayCommandBuffer->vkCommandBuffer(), 0, 1, &overlayColorWriteMask);
+    if (context->device->hasDynamicColorBlendState()) {
+        vkCmdSetColorWriteMaskEXT(context->overlayCommandBuffer->vkCommandBuffer(), 0, 1, &overlayColorWriteMask);
+    }
 }
 
 void UIModuleContext::setOverlayColorLogicOp(int colorLogicOp) {
@@ -1094,7 +1176,7 @@ void UIModuleContext::switchOverlayDraw() {
 
     if (overlayMode == POST) {
         context->overlayCommandBuffer->endRenderPass();
-#ifdef USE_AMD
+#if defined(USE_AMD) || defined(__APPLE__)
         overlayPostColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 #else
         overlayPostColorImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
@@ -1104,12 +1186,12 @@ void UIModuleContext::switchOverlayDraw() {
     if (overlayMode == NONE || overlayMode == POST) {
         context->overlayCommandBuffer->barriersBufferImage(
             {}, {{
-                     .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                     .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                      .oldLayout = overlayDrawColorImage->imageLayout(),
-#ifdef USE_AMD
+#if defined(USE_AMD) || defined(__APPLE__)
                      .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 #else
                      .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
@@ -1120,7 +1202,7 @@ void UIModuleContext::switchOverlayDraw() {
                      .subresourceRange = vk::wholeColorSubresourceRange,
                  },
                  {
-                     .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT |
+                     .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT |
                                      VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                      .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                      .dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
@@ -1132,7 +1214,7 @@ void UIModuleContext::switchOverlayDraw() {
                      .image = overlayDrawDepthStencilImage,
                      .subresourceRange = vk::wholeDepthSubresourceRange,
                  }});
-#ifdef USE_AMD
+#if defined(USE_AMD) || defined(__APPLE__)
         overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 #else
         overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
@@ -1165,7 +1247,7 @@ void UIModuleContext::switchOverlayPost() {
 
     if (overlayMode == DRAW) {
         context->overlayCommandBuffer->endRenderPass();
-#ifdef USE_AMD
+#if defined(USE_AMD) || defined(__APPLE__)
         overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
 #else
@@ -1177,12 +1259,12 @@ void UIModuleContext::switchOverlayPost() {
     if (overlayMode == NONE || overlayMode == DRAW) {
         context->overlayCommandBuffer->barriersBufferImage(
             {}, {{
-                     .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                     .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                      .oldLayout = overlayPostColorImage->imageLayout(),
-#ifdef USE_AMD
+#if defined(USE_AMD) || defined(__APPLE__)
                      .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 #else
                      .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
@@ -1193,9 +1275,9 @@ void UIModuleContext::switchOverlayPost() {
                      .subresourceRange = vk::wholeColorSubresourceRange,
                  },
                  {
-                     .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                     .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                      .oldLayout = overlayDrawColorImage->imageLayout(),
                      .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -1204,7 +1286,7 @@ void UIModuleContext::switchOverlayPost() {
                      .image = overlayDrawColorImage,
                      .subresourceRange = vk::wholeColorSubresourceRange,
                  }});
-#ifdef USE_AMD
+#if defined(USE_AMD) || defined(__APPLE__)
         overlayPostColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 #else
         overlayPostColorImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
@@ -1291,8 +1373,31 @@ void UIModuleContext::drawIndexed(std::shared_ptr<vk::DeviceLocalBuffer> vertexB
                                                    0.25f);
 
     auto &shaderInfo = module->overlayDrawShaderInfo(shaderId);
+#ifdef __APPLE__
+    static uint64_t diagnosticDraw = 0;
+    ++diagnosticDraw;
+    if (diagnosticDraw <= 24 || (diagnosticDraw <= 20000 && diagnosticDraw % 1000 == 0)) {
+        std::fprintf(stderr, "[RADIANCE-E15] draw=%llu mode=%s shader=%s indices=%u indexType=%d uniformOffset=%u viewport=%.0f,%.0f,%.0f,%.0f scissorEnabled=%u scissor=%d,%d,%u,%u colorMask=0x%x depthTest=%u depthWrite=%u depthCompare=%d cull=0x%x blend=%u\n",
+                     static_cast<unsigned long long>(diagnosticDraw), isFlatUiProbeEnabled() ? "flat-ui" : "normal",
+                     shaderInfo.key.c_str(), indexCount, int(indexType), uniformOffset,
+                     overlayViewport.x, overlayViewport.y, overlayViewport.width, overlayViewport.height,
+                     overlayScissorEnabled, overlayScissor.offset.x, overlayScissor.offset.y,
+                     overlayScissor.extent.width, overlayScissor.extent.height, overlayColorWriteMask,
+                     overlayDepthTestEnable, overlayDepthWriteEnable, int(overlayDepthCompareOp), overlayCullMode,
+                     overlayBlendEnabled);
+    }
+#endif
     vkCmdBindPipeline(context->overlayCommandBuffer->vkCommandBuffer(), VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      shaderInfo.pipeline->vkPipeline());
+                      module->overlayDrawPipeline(shaderId, {
+                          .blendEnable = overlayBlendEnabled,
+                          .srcColorBlendFactor = overlayColorBlendEquation.srcColorBlendFactor,
+                          .dstColorBlendFactor = overlayColorBlendEquation.dstColorBlendFactor,
+                          .colorBlendOp = overlayColorBlendEquation.colorBlendOp,
+                          .srcAlphaBlendFactor = overlayColorBlendEquation.srcAlphaBlendFactor,
+                          .dstAlphaBlendFactor = overlayColorBlendEquation.dstAlphaBlendFactor,
+                          .alphaBlendOp = overlayColorBlendEquation.alphaBlendOp,
+                          .colorWriteMask = overlayColorWriteMask,
+                      })->vkPipeline());
 
     uint32_t dynamicOffsets[] = {uniformOffset, 0};
     vkCmdBindDescriptorSets(context->overlayCommandBuffer->vkCommandBuffer(), VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1329,7 +1434,7 @@ void UIModuleContext::postBlur(int times) {
         context->overlayCommandBuffer->draw(3, 1);
 
         context->overlayCommandBuffer->endRenderPass();
-#ifdef USE_AMD
+#if defined(USE_AMD) || defined(__APPLE__)
         overlayPostColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 #else
         overlayPostColorImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
@@ -1340,9 +1445,9 @@ void UIModuleContext::postBlur(int times) {
         context->overlayCommandBuffer->barriersBufferImage(
             {}, {
                     {
-                        .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                        .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                         .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                        .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                        .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                         .oldLayout = overlayPostColorImage->imageLayout(),
                         .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -1352,9 +1457,9 @@ void UIModuleContext::postBlur(int times) {
                         .subresourceRange = vk::wholeColorSubresourceRange,
                     },
                     {
-                        .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                        .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                         .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                        .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                        .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                         .oldLayout = overlayDrawColorImage->imageLayout(),
                         .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -1390,12 +1495,12 @@ void UIModuleContext::postBlur(int times) {
 
         context->overlayCommandBuffer->barriersBufferImage(
             {}, {{
-                     .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                     .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                      .oldLayout = overlayPostColorImage->imageLayout(),
-#ifdef USE_AMD
+#if defined(USE_AMD) || defined(__APPLE__)
                      .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 #else
                      .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
@@ -1406,9 +1511,9 @@ void UIModuleContext::postBlur(int times) {
                      .subresourceRange = vk::wholeColorSubresourceRange,
                  },
                  {
-                     .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                     .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                      .oldLayout = overlayDrawColorImage->imageLayout(),
                      .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -1417,7 +1522,7 @@ void UIModuleContext::postBlur(int times) {
                      .image = overlayDrawColorImage,
                      .subresourceRange = vk::wholeColorSubresourceRange,
                  }});
-#ifdef USE_AMD
+#if defined(USE_AMD) || defined(__APPLE__)
         overlayPostColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 #else
         overlayPostColorImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
@@ -1460,7 +1565,7 @@ void UIModuleContext::end() {
 
     if (overlayMode == DRAW) {
         context->overlayCommandBuffer->endRenderPass();
-#ifdef USE_AMD
+#if defined(USE_AMD) || defined(__APPLE__)
         overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 #else
         overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
@@ -1471,12 +1576,12 @@ void UIModuleContext::end() {
         auto mainQueueIndex = context->physicalDevice->mainQueueIndex();
         context->overlayCommandBuffer->barriersBufferImage(
             {}, {{
-                    .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                    .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                     .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                    .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                    .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                     .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                     .oldLayout = overlayDrawColorImage->imageLayout(),
-#ifdef USE_AMD
+#if defined(USE_AMD) || defined(__APPLE__)
                     .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 #else
                     .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
@@ -1486,7 +1591,7 @@ void UIModuleContext::end() {
                     .image = overlayDrawColorImage,
                     .subresourceRange = vk::wholeColorSubresourceRange,
                 }});
-#ifdef USE_AMD
+#if defined(USE_AMD) || defined(__APPLE__)
         overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 #else
         overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;

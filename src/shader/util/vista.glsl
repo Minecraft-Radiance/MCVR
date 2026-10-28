@@ -25,7 +25,7 @@ bool isVistaCovered(WorldUBO world, uint instanceIndex, vec2 attributes) {
     VistaCoverage coverage = VistaCoverage(address);
     uint geometryBufferIndex = getGeometryBufferIndex(instanceIndex, gl_GeometryIndexEXT);
     if (!isChunkGeometryBufferIndex(geometryBufferIndex)) { return false; }
-    dvec3 origin = round(dvec3(gl_ObjectToWorldEXT[3]) + world.cameraPos.xyz);
+    vec3 origin = round(vec3(gl_ObjectToWorldEXT[3]) + world.cameraPos.xyz);
     if (!isVista && vistaColumnBorders(world, coverage, ivec2(floor(origin.xz / 16.0))) == 0u) { return false; }
     uint i0, i1, i2;
     loadTriangleIndices(geometryBufferIndex, gl_PrimitiveID, i0, i1, i2);
@@ -33,13 +33,13 @@ bool isVistaCovered(WorldUBO world, uint instanceIndex, vec2 attributes) {
     vec3 p1 = loadPositionVertex(geometryBufferIndex, i1).pos;
     vec3 p2 = loadPositionVertex(geometryBufferIndex, i2).pos;
     vec3 localPosition = p0 + attributes.x * (p1 - p0) + attributes.y * (p2 - p0);
-    dvec2 position = origin.xz + dvec2(localPosition.xz);
+    vec2 position = origin.xz + vec2(localPosition.xz);
     ivec2 column = ivec2(floor(position / 16.0));
     vec3 normal = cross(p1 - p0, p2 - p0);
     bool xFace = p0.x == p1.x && p0.x == p2.x && normal.x != 0.0;
     bool zFace = p0.z == p1.z && p0.z == p2.z && normal.z != 0.0;
-    dvec2 planes = round(position / 16.0) * 16.0;
-    dvec2 planeDistance = abs(position - planes);
+    vec2 planes = round(position / 16.0) * 16.0;
+    vec2 planeDistance = abs(position - planes);
     bool offsetWater = !isVista &&
         ((xFace && planeDistance.x > 0.0 && planeDistance.x <= 0.0011) ||
          (zFace && planeDistance.y > 0.0 && planeDistance.y <= 0.0011)) &&

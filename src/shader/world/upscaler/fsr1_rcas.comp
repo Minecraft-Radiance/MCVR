@@ -1,0 +1,28 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#define FFX_GPU 1
+#define FFX_GLSL 1
+#define FFX_HALF 0
+#define FSR_RCAS_F 1
+#define FSR_RCAS_DENOISE 1
+#include "ffx_core.h"
+#include "fsr1/ffx_fsr1.h"
+#include "fsr1_common.glsl"
+layout(local_size_x=16,local_size_y=16) in;
+layout(set=0,binding=1,rgba32f) uniform readonly image2D easuInput;
+layout(set=0,binding=2,rgba16f) uniform writeonly image2D finalOutput;
+layout(push_constant) uniform Settings { float sharpness; } settings;
+vec4 FsrRcasLoadF(ivec2 p) { return imageLoad(easuInput,clamp(p,ivec2(0),imageSize(easuInput)-1)); }
+void FsrRcasInputF(inout float r,inout float g,inout float b) {}
+void main() {
+    ivec2 pixel=ivec2(gl_GlobalInvocationID.xy);
+    if(any(greaterThanEqual(pixel,imageSize(finalOutput))))return;
+    vec3 base=FsrRcasLoadF(pixel).rgb;
+    vec3 color=base;
+    if(settings.sharpness>0) {
+        float strength=exp2(-2.0*(1.0-clamp(settings.sharpness,0,1)));
+        FsrRcasF(color.r,color.g,color.b,uvec2(pixel),uvec4(floatBitsToUint(strength),0,0,0));
+        if(any(isnan(color))||any(isinf(color)))color=base;
+    }
+    imageStore(finalOutput,pixel,vec4(fsr1Decode(color),1));
+}

@@ -22,7 +22,7 @@ float groundWetness(vec3 position, vec3 outwardNormal) {
     if (textureId == 0u || rain <= 0.0001 || outwardNormal.y < 0.5) return 0.0;
     if (max(abs(position.x), abs(position.z)) > 238.0) return 0.0;
     ivec3 cameraCell = ivec3(worldUBO.cameraPos.xyz);
-    vec3 relativePosition = position + vec3(worldUBO.cameraPos.xyz - dvec3(cameraCell));
+    vec3 relativePosition = position + vec3(worldUBO.cameraPos.xyz - vec3(cameraCell));
     ivec2 column = cameraCell.xz + ivec2(floor(relativePosition.xz));
     int surfaceBlockY = cameraCell.y + int(floor(relativePosition.y - 0.001));
     ivec4 center = rainColumn(column, textureId);

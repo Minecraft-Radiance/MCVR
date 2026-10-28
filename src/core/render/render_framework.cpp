@@ -19,6 +19,8 @@
 #include "core/vulkan/result.hpp"
 
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <mutex>
 #include <random>
@@ -114,12 +116,48 @@ void FrameworkContext::fuseFinal() {
     auto mainQueueIndex = physicalDevice->mainQueueIndex();
     auto pipelineContext = f->pipeline_->acquirePipelineContext(shared_from_this());
 
+#ifdef __APPLE__
+    // E06 uses the same blit in both modes. Only this optional source clear differs.
+    static const bool sourceMagentaProbe = [] {
+        const char *mode = std::getenv("MCVR_UI_PRESENT_PROBE");
+        return mode != nullptr && std::strcmp(mode, "source-magenta") == 0;
+    }();
+    static uint32_t diagnosticFrame = 0;
+    auto sourceImage = pipelineContext->uiModuleContext->overlayDrawColorImage;
+    if (diagnosticFrame++ < 6) {
+        std::fprintf(stderr, "[RADIANCE-E07] mode=%s frame=%u image=%u src=%ux%u format=%d layout=%d dst=%ux%u format=%d filter=LINEAR\n",
+                     std::getenv("MCVR_UI_PRESENT_PROBE") ? std::getenv("MCVR_UI_PRESENT_PROBE") : "normal", diagnosticFrame, frameIndex,
+                     sourceImage->width(), sourceImage->height(), int(sourceImage->vkFormat()),
+                     int(sourceImage->imageLayout()), swapchainImage->width(), swapchainImage->height(),
+                     int(swapchainImage->vkFormat()));
+    }
+    if (sourceMagentaProbe) {
+        fuseCommandBuffer->barriersBufferImage({}, {{
+            .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            .oldLayout = sourceImage->imageLayout(),
+            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .srcQueueFamilyIndex = mainQueueIndex,
+            .dstQueueFamilyIndex = mainQueueIndex,
+            .image = sourceImage,
+            .subresourceRange = vk::wholeColorSubresourceRange,
+        }});
+        sourceImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        VkClearColorValue magenta{{1.0f, 0.0f, 1.0f, 1.0f}};
+        VkImageSubresourceRange range = vk::wholeColorSubresourceRange;
+        vkCmdClearColorImage(fuseCommandBuffer->vkCommandBuffer(), sourceImage->vkImage(),
+                            sourceImage->imageLayout(), &magenta, 1, &range);
+    }
+#endif
+
     fuseCommandBuffer->barriersBufferImage(
         {}, {
                 {
-                    .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                    .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                     .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                    .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                    .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                     .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                     .oldLayout = pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout(),
                     .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -129,9 +167,9 @@ void FrameworkContext::fuseFinal() {
                     .subresourceRange = vk::wholeColorSubresourceRange,
                 },
                 {
-                    .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                    .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                     .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                    .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                    .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                     .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                     .oldLayout = swapchainImage->imageLayout(),
                     .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -168,12 +206,12 @@ void FrameworkContext::fuseFinal() {
 
     fuseCommandBuffer->barriersBufferImage(
         {}, {{
-                 .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                 .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                  .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                  .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                  .oldLayout = pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout(),
-#    ifdef USE_AMD
+#    if defined(USE_AMD) || defined(__APPLE__)
                  .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 #    else
                  .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
@@ -184,9 +222,9 @@ void FrameworkContext::fuseFinal() {
                  .subresourceRange = vk::wholeColorSubresourceRange,
              },
              {
-                 .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                 .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                  .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                  .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                  .oldLayout = swapchainImage->imageLayout(),
                  .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
@@ -196,7 +234,7 @@ void FrameworkContext::fuseFinal() {
                  .subresourceRange = vk::wholeColorSubresourceRange,
              }});
 
-#    ifdef USE_AMD
+#    if defined(USE_AMD) || defined(__APPLE__)
     pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 #    else
     pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;

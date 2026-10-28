@@ -15,7 +15,7 @@ else()
 endif()
 
 add_library(core SHARED ${SOURCE_FILES})
-target_link_libraries(core PUBLIC ngx ${JNI_LIBRARIES} VulkanMemoryAllocator volk::volk glfw minizip tinyexpr
+target_link_libraries(core PUBLIC ngx VulkanMemoryAllocator volk::volk glfw minizip tinyexpr
                                    nlohmann_json::nlohmann_json)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND MCVR_UI_BACKEND STREQUAL "OPENGL")
     find_package(X11 REQUIRED)
@@ -75,6 +75,9 @@ if(MCVR_ENABLE_FFX_UPSCALER)
                                       ffx_frameinterpolation_x64
                                       ffx_opticalflow_x64)
     target_compile_definitions(core PUBLIC MCVR_ENABLE_FFX_UPSCALER)
+endif()
+if(MCVR_ENABLE_FSR1_SPATIAL)
+    target_compile_definitions(core PUBLIC MCVR_ENABLE_FSR1_SPATIAL)
 endif()
 if(MCVR_ENABLE_NRD)
     target_link_libraries(core PUBLIC NRD)

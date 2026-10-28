@@ -93,7 +93,7 @@ std::shared_ptr<vk::DeviceLocalBuffer> ChunkGpuBufferPool::acquire(const std::sh
     for (size_t i = 0; i < entries_.size(); i++) {
         const auto &entry = entries_[i];
         if (entry.buffer == nullptr) { continue; }
-        largestCapacity = std::max(largestCapacity, entry.buffer->size());
+        largestCapacity = std::max<VkDeviceSize>(largestCapacity, entry.buffer->size());
         if (entry.reusableFrameSerial > frameSerial || entry.buffer->size() < requiredBytes) { continue; }
         reusableEntryCount++;
         if (bestIndex == entries_.size() || entry.buffer->size() < entries_[bestIndex].buffer->size()) {

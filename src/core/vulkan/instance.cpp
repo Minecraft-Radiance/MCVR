@@ -186,6 +186,9 @@ vk::Instance::Instance(WindowSurfaceBackend surfaceBackend) {
     }
 #endif
 
+#ifdef __APPLE__
+    extStorage.insert("VK_KHR_portability_enumeration");
+#endif
     std::vector<const char *> extensions;
     for (const auto &extension : extStorage) {
         if (availableExtensionSet.find(extension) == availableExtensionSet.end()) {
@@ -198,6 +201,9 @@ vk::Instance::Instance(WindowSurfaceBackend surfaceBackend) {
     VkInstanceCreateInfo createInfo = {};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     createInfo.pApplicationInfo = &appInfo;
+#ifdef __APPLE__
+    createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#endif
     createInfo.enabledExtensionCount = (uint32_t)extensions.size();
     createInfo.ppEnabledExtensionNames = extensions.data();
 

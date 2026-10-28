@@ -82,6 +82,11 @@ class FSRUpscalerModule : public WorldModule, public SharedObject<FSRUpscalerMod
     std::shared_ptr<vk::ComputePipeline> firstHitDepthUpscalePipeline_;
     std::shared_ptr<vk::ComputePipeline> motionUpscalePipeline_;
     std::shared_ptr<vk::ComputePipeline> normalRoughnessUpscalePipeline_;
+    std::vector<std::shared_ptr<vk::DescriptorTable>> fsr1DescriptorTables_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> fsr1IntermediateImages_;
+    std::shared_ptr<vk::Sampler> fsr1Sampler_;
+    std::shared_ptr<vk::ComputePipeline> fsr1EasuPipeline_;
+    std::shared_ptr<vk::ComputePipeline> fsr1RcasPipeline_;
     std::vector<std::shared_ptr<vk::DescriptorTable>> reactiveDescriptorTables_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> reactiveImages_;
     std::array<std::shared_ptr<vk::DeviceLocalImage>, 2> historyDepthImages_;

@@ -67,7 +67,17 @@ vk::DynamicGraphicsPipelineBuilder::DynamicGraphicsPipelineBuilder(int numColorA
     : shaderStageBuilder_(*this) {
     colorBlendAttachmentStates_.resize(numColorAttachments);
     for (int i = 0; i < numColorAttachments; i++) {
-        colorBlendAttachmentStates_[i] = VkPipelineColorBlendAttachmentState{};
+        colorBlendAttachmentStates_[i] = {
+            .blendEnable = VK_FALSE,
+            .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .colorBlendOp = VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .alphaBlendOp = VK_BLEND_OP_ADD,
+            .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        };
     }
     colorBlendState_.attachmentCount = numColorAttachments;
     colorBlendState_.pAttachments = colorBlendAttachmentStates_.data();
@@ -96,10 +106,21 @@ vk::DynamicGraphicsPipelineBuilder::defineInputAssemblyState(VkPrimitiveTopology
     return *this;
 }
 
+vk::DynamicGraphicsPipelineBuilder &vk::DynamicGraphicsPipelineBuilder::defineColorBlendAttachmentState(
+    uint32_t attachment, VkPipelineColorBlendAttachmentState state) {
+    colorBlendAttachmentStates_.at(attachment) = state;
+    return *this;
+}
+
 std::shared_ptr<vk::DynamicGraphicsPipeline> vk::DynamicGraphicsPipelineBuilder::build(std::shared_ptr<Device> device) {
     std::vector<VkDynamicState> filteredDynamicStates;
     for (uint32_t i = 0; i < sizeof(dynamicState_) / sizeof(*dynamicState_); i++) {
         VkDynamicState state = dynamicState_[i];
+        if ((state == VK_DYNAMIC_STATE_COLOR_BLEND_ENABLE_EXT ||
+             state == VK_DYNAMIC_STATE_COLOR_BLEND_EQUATION_EXT ||
+             state == VK_DYNAMIC_STATE_COLOR_WRITE_MASK_EXT) && !device->hasDynamicColorBlendState()) {
+            continue;
+        }
         if ((state == VK_DYNAMIC_STATE_LOGIC_OP_EXT || state == VK_DYNAMIC_STATE_LOGIC_OP_ENABLE_EXT) &&
             !device->hasExtendedDynamicState2LogicOp()) {
             continue;

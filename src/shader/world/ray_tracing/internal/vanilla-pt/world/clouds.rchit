@@ -144,7 +144,8 @@ void main() {
     shadowRay.throughput = vec3(1.0);
     shadowRay.insideBoat = 0u;
     shadowRay.pad0 = 0u;
-    traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, WORLD_MASK, 0, 0, 0, rayOrigin, 0.001, sampledLightDir, 1000, 1);
+    traceRayEXT(topLevelAS, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT, WORLD_MASK, 0, 0, 0,
+                rayOrigin, 0.001, sampledLightDir, 1000, 1);
 
     vec3 lightContribution = shadowRay.radiance;
 

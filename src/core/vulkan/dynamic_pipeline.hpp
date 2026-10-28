@@ -61,6 +61,9 @@ class DynamicGraphicsPipelineBuilder {
 
     DynamicGraphicsPipelineBuilder &defineInputAssemblyState(VkPrimitiveTopology topology);
 
+    DynamicGraphicsPipelineBuilder &defineColorBlendAttachmentState(uint32_t attachment,
+                                                                    VkPipelineColorBlendAttachmentState state);
+
     std::shared_ptr<vk::DynamicGraphicsPipeline> build(std::shared_ptr<Device> device);
 
   private:

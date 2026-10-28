@@ -180,8 +180,9 @@ uint32_t Textures::allocateTexture() {
 #ifdef MCVR_UI_BACKEND_OPENGL
     while (textures_.contains(nextID)) { nextID++; }
 #endif
-    if (nextID >= 4096) {
-        throw std::runtime_error("Texture descriptor capacity exhausted (4096)");
+    if (nextID >= framework->device()->textureDescriptorCapacity()) {
+        throw std::runtime_error("Texture descriptor capacity exhausted (" +
+                                 std::to_string(framework->device()->textureDescriptorCapacity()) + ")");
     }
     textures_.emplace(std::make_pair(nextID, nullptr));
     samplers.emplace(std::make_pair(nextID, nullptr));
@@ -216,8 +217,8 @@ void Textures::initializeTexture(uint32_t id, uint32_t maxLevel, uint32_t width,
     auto textureIter = textures_.find(id);
     if (textureIter == textures_.end()) {
 #ifdef MCVR_UI_BACKEND_OPENGL
-        if (id >= 4096) {
-            throw std::runtime_error("OpenGL texture id exceeds native descriptor capacity (4096)");
+        if (id >= device->textureDescriptorCapacity()) {
+            throw std::runtime_error("OpenGL texture id exceeds supported native descriptor capacity");
         }
         textures_.emplace(std::make_pair(id, nullptr));
         samplers.emplace(std::make_pair(id, nullptr));
@@ -383,7 +384,7 @@ void Textures::queueUploads(const UploadRegionInfo *uploadRegions, uint32_t coun
             uploadRegion.sourceBytesPerPixel == 0 || uploadRegion.sourceBytesPerPixel > 4) {
             throw std::runtime_error("Texture upload contains invalid dimensions or source layout");
         }
-        if (uploadRegion.textureId >= 4096) {
+        if (uploadRegion.textureId >= framework->device()->textureDescriptorCapacity()) {
             throw std::runtime_error("Texture upload targets an invalid texture id");
         }
         auto dstTextureIter = textures_.find(uploadRegion.textureId);

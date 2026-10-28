@@ -21,8 +21,8 @@
 	url = https://github.com/Ljiong201108/DLSS.git
 [submodule "extern/nrd"]
 	path = extern/nrd
-	url = https://github.com/Ljiong201108/NRD.git
-	branch = reblur-sh
+	url = https://github.com/pumitahou/NRD.git
+	branch = V0.1
 [submodule "extern/FidelityFX-SDK"]
 	path = extern/FidelityFX-SDK
 	url = https://github.com/Interstellarss/FidelityFX-SDK.git

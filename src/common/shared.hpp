@@ -289,7 +289,8 @@ namespace Data {
         T_INT worldBottomY;
         T_INT worldTopY;
 
-        T_DVEC4 cameraPos;
+        T_VEC4 cameraPos;
+        T_VEC4 cameraPosLow;
         T_IVEC4 chunkGridInfo;
         T_IVEC4 chunkStorageSectionPos;
 
